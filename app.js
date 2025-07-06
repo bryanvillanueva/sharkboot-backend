@@ -1,50 +1,72 @@
-const express  = require('express');
-const cors     = require('cors');
-const mysql    = require('mysql2/promise');
-const OpenAI   = require('openai').default;          // v5 - importación CJS
-const multer   = require('multer');                  // 2.x
-const bcrypt   = require('bcryptjs');
-const upload   = multer();        
-const authRoutes = require('./routes/auth');                    // memoria, cambias luego
+const express   = require('express');
+const cors      = require('cors');
+const passport  = require('passport');
+const FacebookStrategy = require('passport-facebook').Strategy;
+
+const authRoutes = require('./routes/auth');
+const db         = require('./db');       // tu pool MySQL
+const { sign }   = require('./helpers/jwt');
 
 const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(passport.initialize());
 
-// Pool MySQL
-const db = mysql.createPool({
-  host:     process.env.DB_HOST,
-  port:     process.env.DB_PORT,
-  user:     process.env.DB_USER,
-  password: process.env.DB_PASS,
-  database: process.env.DB_NAME,
-  waitForConnections: true,
-  connectionLimit: 10,
-});
+passport.use(
+  new FacebookStrategy(
+    {
+      clientID:     process.env.FACEBOOK_APP_ID,
+      clientSecret: process.env.FACEBOOK_APP_SECRET,
+      callbackURL:  'https://sharkboot-backend-production.up.railway.app/auth/facebook/callback',
+      profileFields: ['id', 'displayName', 'email'],
+    },
+    async (accessToken, _refreshToken, profile, done) => {
+      try {
+        // 1️⃣ Busca o crea cliente/usuario
+        const [{ length }] = await db.execute(
+          'SELECT id FROM users WHERE provider="FACEBOOK" AND provider_id=?',
+          [profile.id]
+        );
+
+        let userId, clientId;
+        if (length) {
+          // Usuario ya existe
+          const [[user]] = await db.execute(
+            'SELECT id, client_id FROM users WHERE provider="FACEBOOK" AND provider_id=?',
+            [profile.id]
+          );
+          userId = user.id;
+          clientId = user.client_id;
+        } else {
+          // Crea client + user
+          const [cRes] = await db.execute(
+            'INSERT INTO clients (id, name) VALUES (UUID(), ?)',
+            [`Cliente ${profile.displayName}`]
+          );
+          clientId = cRes.insertId;
+
+          const [uRes] = await db.execute(
+            `INSERT INTO users (id, client_id, provider, provider_id, name)
+             VALUES (UUID(), ?, 'FACEBOOK', ?, ?)`,
+            [clientId, profile.id, profile.displayName]
+          );
+          userId = uRes.insertId;
+        }
+
+        // 2️⃣ Genera JWT
+        const token = sign({ userId, clientId, name: profile.displayName });
+        return done(null, { token });
+      } catch (err) {
+        return done(err);
+      }
+    }
+  )
+);
 
 app.use('/auth', authRoutes);
 
-// OpenAI
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
 // Ruta prueba
 app.get('/', (_, res) => res.json({ ok: true, node: process.version }));
-
-// Crear asistente (demo mínimo)
-app.post('/assistants', async (req, res) => {
-  const { name, instructions } = req.body;
-  try {
-    const assistant = await openai.beta.assistants.create({
-      name, instructions,
-      tools: [{ type: 'file_search', vector_store_ids: [process.env.VECTOR_STORE_ID] }],
-    });
-
-    // guarda assistant.id en BD…
-
-    res.json({ assistantId: assistant.id });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'OpenAI error' });
-  }
-});
 
 // Puerto
 const PORT = process.env.PORT || 3000;

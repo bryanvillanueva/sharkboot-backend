@@ -1,8 +1,25 @@
 const express = require('express');
+const passport = require('passport');
 const db = require('../db');
 const { sign } = require('../helpers/jwt');
 
 const router = express.Router();
+
+// 1. Redirige a Facebook
+router.get('/facebook', passport.authenticate('facebook', { scope: ['email'] }));
+
+// 2. Callback (Facebook → backend)
+router.get(
+  '/facebook/callback',
+  passport.authenticate('facebook', { session: false, failureRedirect: '/login' }),
+  (req, res) => {
+    // passport devuelve req.user = { token }
+    const { token } = req.user;
+
+    // Si tu frontend está en otro dominio, redirige con el token como query
+    res.redirect(`https://https://crm.sharkagency.co/?token=${token}`);
+  }
+);
 
 router.post('/facebook', async (req, res) => {
   const { facebookId, name } = req.body;
