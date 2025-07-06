@@ -4,7 +4,8 @@ const mysql    = require('mysql2/promise');
 const OpenAI   = require('openai').default;          // v5 - importación CJS
 const multer   = require('multer');                  // 2.x
 const bcrypt   = require('bcryptjs');
-const upload   = multer();                           // memoria, cambias luego
+const upload   = multer();        
+const authRoutes = require('./routes/auth');                    // memoria, cambias luego
 
 // Pool MySQL
 const db = mysql.createPool({
@@ -16,6 +17,8 @@ const db = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
 });
+
+app.use('/auth', authRoutes);
 
 // OpenAI
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
