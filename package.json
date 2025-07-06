@@ -1,0 +1,28 @@
+{
+  "name": "shark-backend",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node app.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "version": "1.0.0",
+  "main": "index.js",
+  "description": "",
+  "dependencies": {
+    "axios": "1.10",
+    "bcryptjs": "^3.0.2",
+    "cloudinary": "2.7",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "form-data": "^4.0.3",
+    "multer": "^2.0.1",
+    "mysql2": "^3.14.1",
+    "openai": "^5.8.2",
+    "xlsx": "^0.18.5"
+  }
+}
