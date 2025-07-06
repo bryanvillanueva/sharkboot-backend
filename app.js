@@ -7,6 +7,8 @@ const bcrypt   = require('bcryptjs');
 const upload   = multer();        
 const authRoutes = require('./routes/auth');                    // memoria, cambias luego
 
+const app = express();
+
 // Pool MySQL
 const db = mysql.createPool({
   host:     process.env.DB_HOST,
@@ -22,10 +24,6 @@ app.use('/auth', authRoutes);
 
 // OpenAI
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-const app = express();
-app.use(cors());
-app.use(express.json());
 
 // Ruta prueba
 app.get('/', (_, res) => res.json({ ok: true, node: process.version }));
