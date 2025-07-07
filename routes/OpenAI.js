@@ -30,7 +30,14 @@ router.post('/', authGuard, async (req, res) => {
          (id, client_id, openai_id, name, instructions, tool_config)
        VALUES
          (?, ?, ?, ?, ?, ?)`,
-      [localId, clientId, oa.id, name, instructions, JSON.stringify(tool_config)]
+      [
+        localId,
+        clientId,
+        oa.id,
+        name ?? null,
+        instructions ?? null,
+        tool_config ? JSON.stringify(tool_config) : null
+      ]
     );
 
     res.status(201).json({ id: localId, openai_id: oa.id });
