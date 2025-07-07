@@ -7,6 +7,7 @@ const authRoutes = require('./routes/auth');
 const db         = require('./db');       // tu pool MySQL
 const { sign }   = require('./helpers/jwt');
 const openaiRoutes = require('./routes/OpenAI');
+const clientRoutes = require('./routes/client');
 
 
 const app = express();
@@ -40,6 +41,7 @@ passport.use(
 
 app.use('/auth', authRoutes);
 app.use('/assistants', openaiRoutes);
+app.use('/client', clientRoutes);
 
 // Ruta prueba
 app.get('/', (_, res) => res.json({ ok: true, node: process.version }));
