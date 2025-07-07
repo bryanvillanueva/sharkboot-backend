@@ -1,6 +1,7 @@
 const express   = require('express');
 const passport  = require('passport');
 const bcrypt    = require('bcryptjs');
+const { v4: uuidv4 } = require('uuid');
 const db        = require('../db');
 const { sign, verify } = require('../helpers/jwt');
 
@@ -11,41 +12,39 @@ const router = express.Router();
   -------------------------------------------------------------*/
   router.post('/register', async (req, res) => {
     const {
-      name,
-      email,
-      password,
-      company,     // nombre comercial para tabla clients
-      phone,
-      dob,         // 'YYYY-MM-DD' ó '' ⇒ se convierte a NULL
-      country,
-      city,
-      role,
+      name, email, password, company,
+      phone, dob, country, city, role
     } = req.body;
   
     if (!email || !password)
       return res.status(400).json({ error: 'Email y contraseña requeridos' });
   
-    // 1) e-mail único
+    /* 1) e-mail único */
     const [[dup]] = await db.execute(
       'SELECT 1 FROM user_providers WHERE provider=\"EMAIL\" AND provider_id=?',
       [email]
     );
     if (dup) return res.status(409).json({ error: 'Email ya registrado' });
   
-    // 2) crear client
-    const [cRes] = await db.execute(
-      'INSERT INTO clients (id,name) VALUES (UUID(),?)',
-      [company || `Cliente de ${name || email}`]
-    );
-    const clientId = cRes.insertId;
+    /* 2) genera UUIDs en código */
+    const clientId = uuidv4();
+    const userId   = uuidv4();
+    const providerId = uuidv4();
   
-    // 3) crear user con todos los campos
-    const [uRes] = await db.execute(
+    /* 3) insertar client */
+    await db.execute(
+      'INSERT INTO clients (id, name) VALUES (?, ?)',
+      [clientId, company || `Cliente de ${name || email}`]
+    );
+  
+    /* 4) insertar user con todos los campos */
+    await db.execute(
       `INSERT INTO users
          (id, client_id, name, email, phone, dob, country, city, role)
        VALUES
-         (UUID(), ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        userId,
         clientId,
         name || email,
         email,
@@ -56,18 +55,21 @@ const router = express.Router();
         role || null,
       ]
     );
-    const userId = uRes.insertId;
   
-    // 4) proveedor EMAIL
+    /* 5) proveedor EMAIL */
     await db.execute(
       `INSERT INTO user_providers
          (id, user_id, provider, provider_id, password_hash)
-       VALUES
-         (UUID(), ?, 'EMAIL', ?, ?)`,
-      [userId, email, bcrypt.hashSync(password, 12)]
+       VALUES (?, ?, 'EMAIL', ?, ?)`,
+      [
+        providerId,
+        userId,
+        email,
+        bcrypt.hashSync(password, 12),
+      ]
     );
   
-    // 5) token
+    /* 6) token JWT */
     const token = sign({ userId, clientId, name: name || email });
     res.json({ token });
   });
