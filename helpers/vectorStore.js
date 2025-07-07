@@ -14,6 +14,7 @@ exports.getOrCreateVectorStore = async function (assistant) {
   }
 
   if (!storeId) {
+    console.log('openai.beta.vectorStores:', openai.beta.vectorStores);
     const vs = await openai.beta.vectorStores.create({ name: `vs_${assistant.id}` });
     storeId = vs.id;
 
