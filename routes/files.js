@@ -64,7 +64,7 @@ router.get('/:id/files', async (req, res) => {
 
   /* owner check */
   const [[assistant]] = await db.execute(
-    'SELECT openai_id, tool_config FROM assistants WHERE id=? AND client_id=?',
+    'SELECT id, openai_id, tool_config FROM assistants WHERE id=? AND client_id=?',
     [id, clientId]
   );
   if (!assistant) return res.status(404).json({ error: 'No existe' });
@@ -89,7 +89,7 @@ router.delete('/:id/files/:fileId', async (req, res) => {
   const { clientId } = req.auth;
 
   const [[assistant]] = await db.execute(
-    'SELECT tool_config FROM assistants WHERE id=? AND client_id=?',
+    'SELECT id, openai_id, tool_config FROM assistants WHERE id=? AND client_id=?',
     [id, clientId]
   );
   if (!assistant) return res.status(404).json({ error: 'Asistente no encontrado' });

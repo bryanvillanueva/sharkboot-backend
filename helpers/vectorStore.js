@@ -25,7 +25,7 @@ exports.getOrCreateVectorStore = async function (assistant) {
     await db.execute('UPDATE assistants SET tool_config=? WHERE id=?',
       [JSON.stringify(newConfig), assistant.id]);
     
-    /* también actualiza en OpenAI */
+    /* también actualiza en OpenAI usando openai_id */
     await openai.beta.assistants.update(assistant.openai_id, {
       tool_resources: { file_search: { vector_store_ids: [storeId] } }
     });
