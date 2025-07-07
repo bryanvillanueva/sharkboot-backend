@@ -31,23 +31,23 @@ router.post('/:id/files', upload.array('files'), async (req, res) => {
   for (const file of req.files) {
     try {
       /* A. Sube a OpenAI como file */
-      const upload = await openai.files.create({
+      const uploadResult = await openai.files.create({
         file: new File([file.buffer], file.originalname),  // v5 File API
         purpose: 'assistants',
       });
 
       /* B. Asocia al vector store */
-      await openai.beta.vectorStores.files.create(storeId, { file_id: upload.id });
+      await openai.beta.vectorStores.files.create(storeId, { file_id: uploadResult.id });
 
       /* C. Guarda metadatos locales */
       await db.execute(
         `INSERT INTO assistant_files
            (id, assistant_id, openai_file, filename, bytes)
          VALUES (?, ?, ?, ?, ?)`,
-        [uuid(), id, upload.id, file.originalname, file.size]
+        [uuid(), id, uploadResult.id, file.originalname, file.size]
       );
 
-      results.push({ fileId: upload.id, filename: file.originalname });
+      results.push({ fileId: uploadResult.id, filename: file.originalname });
     } catch (err) {
       console.error(err);
       results.push({ filename: file.originalname, error: err.message });
