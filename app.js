@@ -19,43 +19,16 @@ passport.use(
       clientSecret: process.env.FACEBOOK_APP_SECRET,
       callbackURL:  'https://sharkboot-backend-production.up.railway.app/auth/facebook/callback',
       profileFields: ['id', 'displayName', 'email'],
+      passReqToCallback: true,
     },
-    async (accessToken, _refreshToken, profile, done) => {
+    async (req, accessToken, _refreshToken, profile, done) => {
       try {
-        // 1️⃣ Busca o crea cliente/usuario
-        const [{ length }] = await db.execute(
-          'SELECT id FROM users WHERE provider="FACEBOOK" AND provider_id=?',
-          [profile.id]
-        );
-
-        let userId, clientId;
-        if (length) {
-          // Usuario ya existe
-          const [[user]] = await db.execute(
-            'SELECT id, client_id FROM users WHERE provider="FACEBOOK" AND provider_id=?',
-            [profile.id]
-          );
-          userId = user.id;
-          clientId = user.client_id;
-        } else {
-          // Crea client + user
-          const [cRes] = await db.execute(
-            'INSERT INTO clients (id, name) VALUES (UUID(), ?)',
-            [`Cliente ${profile.displayName}`]
-          );
-          clientId = cRes.insertId;
-
-          const [uRes] = await db.execute(
-            `INSERT INTO users (id, client_id, provider, provider_id, name)
-             VALUES (UUID(), ?, 'FACEBOOK', ?, ?)`,
-            [clientId, profile.id, profile.displayName]
-          );
-          userId = uRes.insertId;
-        }
-
-        // 2️⃣ Genera JWT
-        const token = sign({ userId, clientId, name: profile.displayName });
-        return done(null, { token });
+        done(null, {
+          facebookId: profile.id,
+          displayName: profile.displayName,
+          email: profile.emails?.[0]?.value || null,
+          linkToUserId: req.query.state || null,
+        });
       } catch (err) {
         return done(err);
       }
