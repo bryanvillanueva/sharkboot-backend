@@ -6,7 +6,7 @@ const FacebookStrategy = require('passport-facebook').Strategy;
 const authRoutes = require('./routes/auth');
 const db         = require('./db');       // tu pool MySQL
 const { sign }   = require('./helpers/jwt');
-const { db }     = require('./db');
+
 
 const app = express();
 app.use(cors());
