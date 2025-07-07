@@ -9,40 +9,68 @@ const router = express.Router();
 /*---------------------------------------------------------------
   1) REGISTRO POR E-MAIL
   -------------------------------------------------------------*/
-router.post('/register', async (req, res) => {
-  const { name, email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'Email y contraseña requeridos' });
-
-  // ¿ya existe proveedor EMAIL?
-  const [[dup]] = await db.execute(
-    'SELECT 1 FROM user_providers WHERE provider="EMAIL" AND provider_id=?',
-    [email]
-  );
-  if (dup) return res.status(409).json({ error: 'Email ya registrado' });
-
-  /* create client & user */
-  const [cRes] = await db.execute(
-    'INSERT INTO clients (id,name) VALUES (UUID(),?)',
-    [`Cliente de ${name || email}`]
-  );
-  const clientId = cRes.insertId;
-
-  const [uRes] = await db.execute(
-    'INSERT INTO users (id,client_id,name,email) VALUES (UUID(),?,?,?)',
-    [clientId, name || email, email]
-  );
-  const userId = uRes.insertId;
-
-  /* save provider */
-  await db.execute(
-    `INSERT INTO user_providers (id,user_id,provider,provider_id,password_hash)
-     VALUES (UUID(),?,'EMAIL',?,?)`,
-    [userId, email, bcrypt.hashSync(password, 12)]
-  );
-
-  const token = sign({ userId, clientId, name: name || email });
-  res.json({ token });
-});
+  router.post('/register', async (req, res) => {
+    const {
+      name,
+      email,
+      password,
+      company,     // nombre comercial para tabla clients
+      phone,
+      dob,         // 'YYYY-MM-DD' ó '' ⇒ se convierte a NULL
+      country,
+      city,
+      role,
+    } = req.body;
+  
+    if (!email || !password)
+      return res.status(400).json({ error: 'Email y contraseña requeridos' });
+  
+    // 1) e-mail único
+    const [[dup]] = await db.execute(
+      'SELECT 1 FROM user_providers WHERE provider=\"EMAIL\" AND provider_id=?',
+      [email]
+    );
+    if (dup) return res.status(409).json({ error: 'Email ya registrado' });
+  
+    // 2) crear client
+    const [cRes] = await db.execute(
+      'INSERT INTO clients (id,name) VALUES (UUID(),?)',
+      [company || `Cliente de ${name || email}`]
+    );
+    const clientId = cRes.insertId;
+  
+    // 3) crear user con todos los campos
+    const [uRes] = await db.execute(
+      `INSERT INTO users
+         (id, client_id, name, email, phone, dob, country, city, role)
+       VALUES
+         (UUID(), ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        clientId,
+        name || email,
+        email,
+        phone || null,
+        dob   || null,
+        country || null,
+        city || null,
+        role || null,
+      ]
+    );
+    const userId = uRes.insertId;
+  
+    // 4) proveedor EMAIL
+    await db.execute(
+      `INSERT INTO user_providers
+         (id, user_id, provider, provider_id, password_hash)
+       VALUES
+         (UUID(), ?, 'EMAIL', ?, ?)`,
+      [userId, email, bcrypt.hashSync(password, 12)]
+    );
+  
+    // 5) token
+    const token = sign({ userId, clientId, name: name || email });
+    res.json({ token });
+  });
 
 /*---------------------------------------------------------------
   2) LOGIN POR E-MAIL
