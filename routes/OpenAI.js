@@ -3,10 +3,9 @@ const { v4: uuidv4 } = require('uuid');
 const OpenAI = require('openai').default;
 const db = require('../db');
 const authGuard = require('../middlewares/authGuard');
+const { openai } = require('../helpers/openai');
 
 const router = express.Router();
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // 1. POST /assistants (creación)
 router.post('/', authGuard, async (req, res) => {
@@ -16,11 +15,14 @@ router.post('/', authGuard, async (req, res) => {
   try {
     // A) crear en OpenAI
     const oa = await openai.beta.assistants.create({
-      model: model || 'gpt-4o-mini',
       name,
       instructions,
-      tools: Object.keys(tool_config || {}).map(k => ({ type: k.replace('_','-') })),
-      tool_resources: tool_config || undefined,
+      model: model || 'gpt-4.1-mini',
+      tools: [
+        { type: "file_search" },
+        { type: "code_interpreter" }
+      ],
+      tool_resources: tool_config || undefined, // puede ser undefined o incluir vector_store_ids
     });
 
     // B) guardar en BD
@@ -30,14 +32,7 @@ router.post('/', authGuard, async (req, res) => {
          (id, client_id, openai_id, name, instructions, tool_config)
        VALUES
          (?, ?, ?, ?, ?, ?)`,
-      [
-        localId,
-        clientId,
-        oa.id,
-        name ?? null,
-        instructions ?? null,
-        tool_config ? JSON.stringify(tool_config) : null
-      ]
+      [localId, clientId, oa.id, name, instructions, JSON.stringify(tool_config)]
     );
 
     res.status(201).json({ id: localId, openai_id: oa.id });
@@ -87,13 +82,22 @@ router.delete('/:id', authGuard, async (req, res) => {
   const { clientId } = req.auth;
   const { id } = req.params;
 
+  // Busca openai_id
   const [[row]] = await db.execute(
     'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
     [id, clientId]
   );
   if (!row) return res.status(404).json({ error: 'No existe' });
 
-  // Opcional: await openai.beta.assistants.del(row.openai_id);
+  // Elimina en OpenAI
+  try {
+    await openai.beta.assistants.del(row.openai_id);
+  } catch (err) {
+    // Si ya no existe en OpenAI, continúa con el borrado local
+    console.error('Error eliminando en OpenAI:', err.message);
+  }
+
+  // Elimina en BD
   await db.execute('DELETE FROM assistants WHERE id=?', [id]);
 
   res.json({ ok: true });

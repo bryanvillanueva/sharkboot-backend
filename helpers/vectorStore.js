@@ -3,7 +3,7 @@ const db = require('../db');
 
 /**
  * Devuelve el ID del vector store asociado a un assistant.
- * Si no existe, crea uno y actualiza assistants.tool_config.
+ * Si no existe, crea uno y actualiza assistants.tool_config y el asistente en OpenAI.
  */
 exports.getOrCreateVectorStore = async function (assistant) {
   let storeId;
@@ -14,11 +14,10 @@ exports.getOrCreateVectorStore = async function (assistant) {
   }
 
   if (!storeId) {
-    console.log('openai.beta.vectorStores:', openai.beta.vectorStores);
     const vs = await openai.beta.vectorStores.create({ name: `vs_${assistant.id}` });
     storeId = vs.id;
 
-    /* actualiza tool_config en BD */
+    // Actualiza tool_config en BD
     const newConfig = {
       ...(JSON.parse(assistant.tool_config || '{}')),
       file_search: { vector_store_ids: [storeId] },
@@ -26,7 +25,7 @@ exports.getOrCreateVectorStore = async function (assistant) {
     await db.execute('UPDATE assistants SET tool_config=? WHERE id=?',
       [JSON.stringify(newConfig), assistant.id]);
     
-    /* también actualiza en OpenAI usando openai_id */
+    // Actualiza en OpenAI usando openai_id
     await openai.beta.assistants.update(assistant.openai_id, {
       tool_resources: { file_search: { vector_store_ids: [storeId] } }
     });

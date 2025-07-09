@@ -76,11 +76,6 @@ router.get('/:id/files', async (req, res) => {
   );
   return res.json(rows);
 
-  /* Si NO guardas en BD:
-  const storeId = await getOrCreateVectorStore(assistant);
-  const listing = await openai.beta.vectorStores.files.list(storeId);
-  res.json(listing.data);
-  */
 });
 
 /* -------- DELETE /assistants/:id/files/:fileId ----------- */
@@ -108,6 +103,79 @@ router.delete('/:id/files/:fileId', async (req, res) => {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ----------- CODE INTERPRETER: SUBIR ARCHIVOS DE ENTRADA PARA UN RUN -----------
+// POST /assistants/:id/runs/:runId/files (archivos de entrada para Code Interpreter)
+router.post('/:id/runs/:runId/files', upload.array('files'), async (req, res) => {
+  const { id, runId } = req.params;
+  const { clientId } = req.auth;
+
+  // Verifica ownership
+  const [[assistant]] = await db.execute(
+    'SELECT id, openai_id FROM assistants WHERE id=? AND client_id=?',
+    [id, clientId]
+  );
+  if (!assistant) return res.status(404).json({ error: 'Asistente no encontrado' });
+
+  // Sube cada archivo a OpenAI y asócialo al thread/run
+  const fileIds = [];
+  for (const file of req.files) {
+    const uploadResult = await openai.files.create({
+      file: new File([file.buffer], file.originalname),
+      purpose: 'assistants',
+    });
+    fileIds.push(uploadResult.id);
+  }
+
+  // El frontend debe usar estos fileIds para asociarlos al thread/message/run
+  res.json({ fileIds });
+});
+
+// ----------- CODE INTERPRETER: LISTAR ARCHIVOS DE SALIDA DE UN RUN -----------
+// GET /assistants/:id/runs/:runId/files (archivos de salida generados por Code Interpreter)
+router.get('/:id/runs/:runId/files', async (req, res) => {
+  const { id, runId } = req.params;
+  const { clientId } = req.auth;
+
+  // Verifica ownership
+  const [[assistant]] = await db.execute(
+    'SELECT id FROM assistants WHERE id=? AND client_id=?',
+    [id, clientId]
+  );
+  if (!assistant) return res.status(404).json({ error: 'Asistente no encontrado' });
+
+  const [rows] = await db.execute(
+    'SELECT file_id, filename, bytes, created_at, thumb_url FROM assistant_run_files WHERE assistant_id=? AND run_id=?',
+    [id, runId]
+  );
+  res.json(rows);
+});
+
+// ----------- CODE INTERPRETER: DESCARGAR ARCHIVO DE SALIDA DE UN RUN -----------
+// GET /assistants/:id/runs/:runId/files/:fileId
+router.get('/:id/runs/:runId/files/:fileId', async (req, res) => {
+  const { id, runId, fileId } = req.params;
+  const { clientId } = req.auth;
+
+  // Verifica ownership
+  const [[assistant]] = await db.execute(
+    'SELECT id FROM assistants WHERE id=? AND client_id=?',
+    [id, clientId]
+  );
+  if (!assistant) return res.status(404).json({ error: 'Asistente no encontrado' });
+
+  // Busca metadatos
+  const [[fileRow]] = await db.execute(
+    'SELECT filename FROM assistant_run_files WHERE assistant_id=? AND run_id=? AND file_id=?',
+    [id, runId, fileId]
+  );
+  if (!fileRow) return res.status(404).json({ error: 'Archivo no encontrado' });
+
+  // Descarga el archivo desde OpenAI
+  const fileStream = await openai.files.retrieveContent(fileId);
+  res.setHeader('Content-Disposition', `attachment; filename="${fileRow.filename}"`);
+  fileStream.pipe(res);
 });
 
 module.exports = router; 
