@@ -13,6 +13,14 @@ router.post('/', authGuard, async (req, res) => {
   const { name, instructions, model, tool_config } = req.body;
 
   try {
+    // Prepara tool_resources asegurando code_interpreter.file_ids: []
+    let tool_resources = tool_config || {};
+    if (!tool_resources.code_interpreter) {
+      tool_resources.code_interpreter = { file_ids: [] };
+    } else if (!Array.isArray(tool_resources.code_interpreter.file_ids)) {
+      tool_resources.code_interpreter.file_ids = [];
+    }
+
     // A) crear en OpenAI
     const oa = await openai.beta.assistants.create({
       name,
@@ -22,7 +30,7 @@ router.post('/', authGuard, async (req, res) => {
         { type: "file_search" },
         { type: "code_interpreter" }
       ],
-      tool_resources: tool_config || undefined, // puede ser undefined o incluir vector_store_ids
+      tool_resources,
     });
 
     // B) guardar en BD
@@ -32,7 +40,7 @@ router.post('/', authGuard, async (req, res) => {
          (id, client_id, openai_id, name, instructions, tool_config)
        VALUES
          (?, ?, ?, ?, ?, ?)`,
-      [localId, clientId, oa.id, name, instructions, JSON.stringify(tool_config)]
+      [localId, clientId, oa.id, name, instructions, JSON.stringify(tool_resources)]
     );
 
     res.status(201).json({ id: localId, openai_id: oa.id });
@@ -56,7 +64,7 @@ router.get('/', authGuard, async (req, res) => {
 router.patch('/:id', authGuard, async (req, res) => {
   const { clientId } = req.auth;
   const { id } = req.params;
-  const { name, instructions } = req.body;
+  const { name, instructions, tool_config } = req.body;
 
   // A) saca openai_id asegurando que pertenezca al cliente
   const [[row]] = await db.execute(
@@ -65,13 +73,25 @@ router.patch('/:id', authGuard, async (req, res) => {
   );
   if (!row) return res.status(404).json({ error: 'Asistente no encontrado' });
 
+  // Prepara tool_resources asegurando code_interpreter.file_ids: []
+  let tool_resources = tool_config || {};
+  if (!tool_resources.code_interpreter) {
+    tool_resources.code_interpreter = { file_ids: [] };
+  } else if (!Array.isArray(tool_resources.code_interpreter.file_ids)) {
+    tool_resources.code_interpreter.file_ids = [];
+  }
+
   // B) actualizar en OpenAI
-  await openai.beta.assistants.update(row.openai_id, { name, instructions });
+  await openai.beta.assistants.update(row.openai_id, {
+    name,
+    instructions,
+    tool_resources
+  });
 
   // C) actualizar metadatos locales
   await db.execute(
-    'UPDATE assistants SET name=?, instructions=? WHERE id=?',
-    [name, instructions, id]
+    'UPDATE assistants SET name=?, instructions=?, tool_config=? WHERE id=?',
+    [name, instructions, JSON.stringify(tool_resources), id]
   );
 
   res.json({ ok: true });
@@ -101,6 +121,79 @@ router.delete('/:id', authGuard, async (req, res) => {
   await db.execute('DELETE FROM assistants WHERE id=?', [id]);
 
   res.json({ ok: true });
+});
+
+// Crear un run (y thread si no existe)
+router.post('/:id/runs', authGuard, async (req, res) => {
+  const { id } = req.params; // id local
+  const { clientId } = req.auth;
+  const { thread_id, message, file_ids } = req.body;
+
+  // Busca openai_id
+  const [[assistant]] = await db.execute(
+    'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
+    [id, clientId]
+  );
+  if (!assistant) return res.status(404).json({ error: 'Asistente no encontrado' });
+
+  // Si no hay thread, créalo
+  let threadId = thread_id;
+  if (!threadId) {
+    const thread = await openai.beta.threads.create();
+    threadId = thread.id;
+  }
+
+  // Crea el mensaje en el thread
+  await openai.beta.threads.messages.create(threadId, {
+    role: "user",
+    content: message,
+    file_ids: file_ids || []
+  });
+
+  // Crea el run
+  const run = await openai.beta.threads.runs.create(threadId, {
+    assistant_id: assistant.openai_id
+  });
+
+  res.json({ runId: run.id, threadId });
+});
+
+// Obtener el estado y resultado de un run
+router.get('/:id/runs/:runId', authGuard, async (req, res) => {
+  const { id, runId } = req.params;
+  const { clientId } = req.auth;
+
+  // Busca openai_id
+  const [[assistant]] = await db.execute(
+    'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
+    [id, clientId]
+  );
+  if (!assistant) return res.status(404).json({ error: 'Asistente no encontrado' });
+
+  // Busca el run
+  const run = await openai.beta.threads.runs.retrieve(runId);
+  res.json(run);
+});
+
+// Obtener los mensajes del thread asociados al run
+router.get('/:id/runs/:runId/messages', authGuard, async (req, res) => {
+  const { id, runId } = req.params;
+  const { clientId } = req.auth;
+
+  // Busca openai_id
+  const [[assistant]] = await db.execute(
+    'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
+    [id, clientId]
+  );
+  if (!assistant) return res.status(404).json({ error: 'Asistente no encontrado' });
+
+  // Busca el run para obtener el threadId
+  const run = await openai.beta.threads.runs.retrieve(runId);
+  const threadId = run.thread_id;
+
+  // Lista los mensajes del thread
+  const messages = await openai.beta.threads.messages.list(threadId);
+  res.json(messages);
 });
 
 module.exports = router; 
