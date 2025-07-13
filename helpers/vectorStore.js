@@ -14,8 +14,8 @@ exports.getOrCreateVectorStore = async function (assistant) {
   }
 
   if (!storeId) {
-    // En OpenAI SDK v5, los vector stores se crean a través de la API de assistants
-    const vectorStore = await openai.beta.assistants.vectorStores.create({
+    // En OpenAI SDK v5, los vector stores se crean directamente
+    const vectorStore = await openai.beta.vectorStores.create({
       name: `vs_${assistant.id}`
     });
     storeId = vectorStore.id;
@@ -35,4 +35,4 @@ exports.getOrCreateVectorStore = async function (assistant) {
   }
 
   return storeId;
-}; 
+};

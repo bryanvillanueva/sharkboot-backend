@@ -36,8 +36,8 @@ router.post('/:id/files', upload.array('files'), async (req, res) => {
         purpose: 'assistants',
       });
 
-      /* B. Asocia al vector store */
-      await openai.beta.assistants.vectorStores.files.create(storeId, { file_id: uploadResult.id });
+      /* B. Asocia al vector store - API corregida para v5 */
+      await openai.beta.vectorStores.files.create(storeId, { file_id: uploadResult.id });
 
       /* C. Guarda metadatos locales */
       await db.execute(
@@ -92,8 +92,8 @@ router.delete('/:id/files/:fileId', async (req, res) => {
   const storeId = await getOrCreateVectorStore(assistant);
 
   try {
-    /* A. Quita del vector store (OpenAI) */
-    await openai.beta.assistants.vectorStores.files.del(storeId, fileId);
+    /* A. Quita del vector store (OpenAI) - API corregida para v5 */
+    await openai.beta.vectorStores.files.del(storeId, fileId);
 
     /* B. Elimina metadatos locales */
     await db.execute('DELETE FROM assistant_files WHERE assistant_id=? AND openai_file=?', [id, fileId]);
@@ -178,4 +178,4 @@ router.get('/:id/runs/:runId/files/:fileId', async (req, res) => {
   fileStream.pipe(res);
 });
 
-module.exports = router; 
+module.exports = router;
