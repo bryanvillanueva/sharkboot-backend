@@ -496,4 +496,330 @@ router.get('/:id', authGuard, async (req, res) => {
   }
 });
 
+// ============== RUTAS PARA TESTING DE ASISTENTES (RUNS) ==============
+
+// 10. Crear un thread y enviar mensaje (todo en uno)
+router.post('/:id/chat', authGuard, async (req, res) => {
+  const { id } = req.params;
+  const { clientId } = req.auth;
+  const { message, thread_id, file_ids = [] } = req.body;
+
+  try {
+    // Verificar ownership del asistente
+    const [[assistant]] = await db.execute(
+      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
+      [id, clientId]
+    );
+    if (!assistant) {
+      return res.status(404).json({ error: 'Asistente no encontrado' });
+    }
+
+    let threadId = thread_id;
+
+    // Crear thread si no existe
+    if (!threadId) {
+      const thread = await openai.beta.threads.create();
+      threadId = thread.id;
+      console.log('Nuevo thread creado:', threadId);
+    }
+
+    // Agregar mensaje al thread
+    await openai.beta.threads.messages.create(threadId, {
+      role: "user",
+      content: message,
+      file_ids: file_ids
+    });
+
+    // Crear y ejecutar run
+    const run = await openai.beta.threads.runs.create(threadId, {
+      assistant_id: assistant.openai_id
+    });
+
+    console.log('Run creado:', {
+      runId: run.id,
+      threadId: threadId,
+      status: run.status
+    });
+
+    res.json({
+      thread_id: threadId,
+      run_id: run.id,
+      status: run.status,
+      created_at: run.created_at
+    });
+
+  } catch (error) {
+    console.error('Error en chat:', error);
+    res.status(500).json({
+      error: 'Error procesando mensaje',
+      details: error.message
+    });
+  }
+});
+
+// 11. Obtener estado detallado de un run con polling
+router.get('/:id/runs/:runId/status', authGuard, async (req, res) => {
+  const { id, runId } = req.params;
+  const { clientId } = req.auth;
+
+  try {
+    // Verificar ownership
+    const [[assistant]] = await db.execute(
+      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
+      [id, clientId]
+    );
+    if (!assistant) {
+      return res.status(404).json({ error: 'Asistente no encontrado' });
+    }
+
+    // Obtener run
+    const run = await openai.beta.threads.runs.retrieve(runId);
+    
+    let response = {
+      id: run.id,
+      status: run.status,
+      created_at: run.created_at,
+      started_at: run.started_at,
+      completed_at: run.completed_at,
+      failed_at: run.failed_at,
+      cancelled_at: run.cancelled_at,
+      expires_at: run.expires_at,
+      thread_id: run.thread_id,
+      assistant_id: run.assistant_id,
+      model: run.model,
+      instructions: run.instructions,
+      usage: run.usage,
+      last_error: run.last_error
+    };
+
+    // Si el run está completado, obtener también los mensajes más recientes
+    if (run.status === 'completed') {
+      try {
+        const messages = await openai.beta.threads.messages.list(run.thread_id, {
+          order: 'desc',
+          limit: 10
+        });
+        
+        // Filtrar solo los mensajes del asistente más recientes
+        const assistantMessages = messages.data.filter(msg => 
+          msg.role === 'assistant' && 
+          msg.created_at >= run.created_at
+        );
+
+        response.latest_messages = assistantMessages.map(msg => ({
+          id: msg.id,
+          content: msg.content,
+          created_at: msg.created_at,
+          file_ids: msg.file_ids
+        }));
+
+      } catch (msgError) {
+        console.error('Error obteniendo mensajes:', msgError);
+        response.latest_messages = [];
+      }
+    }
+
+    // Si el run requiere acción, incluir detalles
+    if (run.status === 'requires_action') {
+      response.required_action = run.required_action;
+    }
+
+    res.json(response);
+
+  } catch (error) {
+    console.error('Error obteniendo estado del run:', error);
+    if (error.status === 404) {
+      res.status(404).json({ error: 'Run no encontrado' });
+    } else {
+      res.status(500).json({
+        error: 'Error obteniendo estado del run',
+        details: error.message
+      });
+    }
+  }
+});
+
+// 12. Obtener conversación completa de un thread
+router.get('/:id/threads/:threadId/conversation', authGuard, async (req, res) => {
+  const { id, threadId } = req.params;
+  const { clientId } = req.auth;
+  const { limit = 50 } = req.query;
+
+  try {
+    // Verificar ownership
+    const [[assistant]] = await db.execute(
+      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
+      [id, clientId]
+    );
+    if (!assistant) {
+      return res.status(404).json({ error: 'Asistente no encontrado' });
+    }
+
+    // Obtener mensajes del thread
+    const messages = await openai.beta.threads.messages.list(threadId, {
+      order: 'asc', // Orden cronológico
+      limit: parseInt(limit)
+    });
+
+    // Formatear mensajes para el frontend
+    const conversation = messages.data.map(msg => ({
+      id: msg.id,
+      role: msg.role,
+      content: msg.content.map(content => {
+        if (content.type === 'text') {
+          return {
+            type: 'text',
+            text: content.text.value,
+            annotations: content.text.annotations
+          };
+        } else if (content.type === 'image_file') {
+          return {
+            type: 'image',
+            file_id: content.image_file.file_id
+          };
+        }
+        return content;
+      }),
+      created_at: msg.created_at,
+      file_ids: msg.file_ids || []
+    }));
+
+    res.json({
+      thread_id: threadId,
+      messages: conversation,
+      count: conversation.length,
+      has_more: messages.has_more
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo conversación:', error);
+    res.status(500).json({
+      error: 'Error obteniendo conversación',
+      details: error.message
+    });
+  }
+});
+
+// 13. Enviar mensaje adicional a un thread existente
+router.post('/:id/threads/:threadId/messages', authGuard, async (req, res) => {
+  const { id, threadId } = req.params;
+  const { clientId } = req.auth;
+  const { message, file_ids = [] } = req.body;
+
+  try {
+    // Verificar ownership
+    const [[assistant]] = await db.execute(
+      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
+      [id, clientId]
+    );
+    if (!assistant) {
+      return res.status(404).json({ error: 'Asistente no encontrado' });
+    }
+
+    // Agregar mensaje al thread
+    const threadMessage = await openai.beta.threads.messages.create(threadId, {
+      role: "user",
+      content: message,
+      file_ids: file_ids
+    });
+
+    // Crear nuevo run
+    const run = await openai.beta.threads.runs.create(threadId, {
+      assistant_id: assistant.openai_id
+    });
+
+    res.json({
+      message_id: threadMessage.id,
+      run_id: run.id,
+      thread_id: threadId,
+      status: run.status,
+      created_at: run.created_at
+    });
+
+  } catch (error) {
+    console.error('Error enviando mensaje:', error);
+    res.status(500).json({
+      error: 'Error enviando mensaje',
+      details: error.message
+    });
+  }
+});
+
+// 14. Eliminar un thread completo
+router.delete('/:id/threads/:threadId', authGuard, async (req, res) => {
+  const { id, threadId } = req.params;
+  const { clientId } = req.auth;
+
+  try {
+    // Verificar ownership
+    const [[assistant]] = await db.execute(
+      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
+      [id, clientId]
+    );
+    if (!assistant) {
+      return res.status(404).json({ error: 'Asistente no encontrado' });
+    }
+
+    // Eliminar thread
+    await openai.beta.threads.del(threadId);
+
+    res.json({
+      success: true,
+      thread_id: threadId,
+      deleted_at: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Error eliminando thread:', error);
+    res.status(500).json({
+      error: 'Error eliminando thread',
+      details: error.message
+    });
+  }
+});
+
+// 15. Obtener información de un thread
+router.get('/:id/threads/:threadId', authGuard, async (req, res) => {
+  const { id, threadId } = req.params;
+  const { clientId } = req.auth;
+
+  try {
+    // Verificar ownership
+    const [[assistant]] = await db.execute(
+      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
+      [id, clientId]
+    );
+    if (!assistant) {
+      return res.status(404).json({ error: 'Asistente no encontrado' });
+    }
+
+    // Obtener thread
+    const thread = await openai.beta.threads.retrieve(threadId);
+
+    // Obtener conteo de mensajes
+    const messages = await openai.beta.threads.messages.list(threadId, { limit: 1 });
+    
+    res.json({
+      id: thread.id,
+      created_at: thread.created_at,
+      metadata: thread.metadata,
+      message_count: messages.data.length,
+      last_message_at: messages.data[0]?.created_at
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo thread:', error);
+    if (error.status === 404) {
+      res.status(404).json({ error: 'Thread no encontrado' });
+    } else {
+      res.status(500).json({
+        error: 'Error obteniendo thread',
+        details: error.message
+      });
+    }
+  }
+});
+
+// ============== FIN DE RUTAS PARA TESTING ==============
+
 module.exports = router;
