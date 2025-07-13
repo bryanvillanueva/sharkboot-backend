@@ -67,7 +67,7 @@ router.post('/', authGuard, async (req, res) => {
 
     const openaiAssistant = response.data;
 
-    // Guardar en BD local
+    // Guardar en BD local - usando CHAR(36) para UUIDs
     const localId = uuidv4();
     await db.execute(
       `INSERT INTO assistants
@@ -161,7 +161,7 @@ router.patch('/:id', authGuard, async (req, res) => {
     }
 
     // Actualizar en OpenAI usando axios
-    await axios.post(
+    await axios.patch(
       `https://api.openai.com/v1/assistants/${row.openai_id}`,
       updateData,
       { headers: getOpenAIHeaders(true) }
@@ -227,11 +227,21 @@ router.delete('/:id', authGuard, async (req, res) => {
       }
     }
 
-    // Eliminar archivos asociados de la BD local
+    // Eliminar runs asociados de la BD local (se eliminan automáticamente por FK CASCADE)
     await db.execute(
-      'DELETE FROM assistant_files WHERE assistant_id=?',
+      'DELETE FROM assistant_runs WHERE assistant_id=?',
       [id]
     );
+
+    // Eliminar archivos asociados de la BD local (si existe la tabla)
+    try {
+      await db.execute(
+        'DELETE FROM assistant_files WHERE assistant_id=?',
+        [id]
+      );
+    } catch (fileError) {
+      console.log('Tabla assistant_files no existe o ya limpia');
+    }
 
     // Eliminar asistente en OpenAI
     try {
@@ -280,11 +290,17 @@ router.get('/:id', authGuard, async (req, res) => {
       return res.status(404).json({ error: 'Asistente no encontrado' });
     }
 
-    // Contar archivos asociados
-    const [[fileCount]] = await db.execute(
-      'SELECT COUNT(*) as count FROM assistant_files WHERE assistant_id=?',
-      [id]
-    );
+    // Contar archivos asociados (si la tabla existe)
+    let fileCount = 0;
+    try {
+      const [[fileCountResult]] = await db.execute(
+        'SELECT COUNT(*) as count FROM assistant_files WHERE assistant_id=?',
+        [id]
+      );
+      fileCount = fileCountResult.count;
+    } catch (fileError) {
+      console.log('Tabla assistant_files no existe');
+    }
 
     // Parsear tool_config
     let toolConfig = {};
@@ -297,7 +313,7 @@ router.get('/:id', authGuard, async (req, res) => {
     res.json({
       ...assistant,
       tool_config: toolConfig,
-      file_count: fileCount.count
+      file_count: fileCount
     });
     
   } catch (error) {
@@ -375,6 +391,25 @@ router.post('/:id/chat', authGuard, async (req, res) => {
 
     const run = runResponse.data;
 
+    // ✅ GUARDAR información del run en la base de datos
+    try {
+      const runUuid = uuidv4(); // Generar UUID para el ID de la tabla
+      await db.execute(
+        'INSERT INTO assistant_runs (id, assistant_id, client_id, thread_id, run_id, status) VALUES (?, ?, ?, ?, ?, ?)',
+        [runUuid, id, clientId, threadId, run.id, run.status]
+      );
+      console.log('Run guardado en BD:', { 
+        runTableId: runUuid,
+        runId: run.id, 
+        threadId,
+        assistantId: id,
+        clientId 
+      });
+    } catch (dbError) {
+      console.error('Error guardando run en BD:', dbError);
+      // Continuar aunque falle el guardado en BD
+    }
+
     console.log('Run creado:', {
       runId: run.id,
       threadId: threadId,
@@ -403,7 +438,7 @@ router.get('/:id/runs/:runId/status', authGuard, async (req, res) => {
   const { clientId } = req.auth;
 
   try {
-    // Verificar ownership
+    // Verificar ownership del asistente
     const [[assistant]] = await db.execute(
       'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
       [id, clientId]
@@ -412,9 +447,24 @@ router.get('/:id/runs/:runId/status', authGuard, async (req, res) => {
       return res.status(404).json({ error: 'Asistente no encontrado' });
     }
 
-    // Obtener run
+    // ✅ OBTENER thread_id desde la base de datos
+    const [[runInfo]] = await db.execute(
+      'SELECT thread_id FROM assistant_runs WHERE run_id=? AND client_id=? AND assistant_id=?',
+      [runId, clientId, id]
+    );
+    
+    if (!runInfo) {
+      return res.status(404).json({ 
+        error: 'Run no encontrado',
+        details: 'El run no existe o no pertenece a este cliente/asistente'
+      });
+    }
+
+    const threadId = runInfo.thread_id;
+
+    // ✅ OBTENER run usando el endpoint correcto
     const runResponse = await axios.get(
-      `https://api.openai.com/v1/threads/runs/${runId}`,
+      `https://api.openai.com/v1/threads/${threadId}/runs/${runId}`,
       { headers: getOpenAIHeaders(true) }
     );
 
@@ -441,7 +491,7 @@ router.get('/:id/runs/:runId/status', authGuard, async (req, res) => {
     if (run.status === 'completed') {
       try {
         const messagesResponse = await axios.get(
-          `https://api.openai.com/v1/threads/${run.thread_id}/messages?order=desc&limit=10`,
+          `https://api.openai.com/v1/threads/${threadId}/messages?order=desc&limit=10`,
           { headers: getOpenAIHeaders(true) }
         );
         
@@ -467,12 +517,22 @@ router.get('/:id/runs/:runId/status', authGuard, async (req, res) => {
       response.required_action = run.required_action;
     }
 
+    // ✅ ACTUALIZAR estado en la base de datos
+    try {
+      await db.execute(
+        'UPDATE assistant_runs SET status=?, updated_at=CURRENT_TIMESTAMP WHERE run_id=? AND client_id=?',
+        [run.status, runId, clientId]
+      );
+    } catch (dbError) {
+      console.error('Error actualizando estado del run:', dbError);
+    }
+
     res.json(response);
 
   } catch (error) {
     console.error('Error obteniendo estado del run:', error);
     if (error.response?.status === 404) {
-      res.status(404).json({ error: 'Run no encontrado' });
+      res.status(404).json({ error: 'Run no encontrado en OpenAI' });
     } else {
       res.status(500).json({
         error: 'Error obteniendo estado del run',
@@ -488,7 +548,7 @@ router.post('/:id/runs/:runId/cancel', authGuard, async (req, res) => {
   const { clientId } = req.auth;
 
   try {
-    // Verificar ownership
+    // Verificar ownership del asistente
     const [[assistant]] = await db.execute(
       'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
       [id, clientId]
@@ -497,12 +557,37 @@ router.post('/:id/runs/:runId/cancel', authGuard, async (req, res) => {
       return res.status(404).json({ error: 'Asistente no encontrado' });
     }
 
-    // Cancelar run
+    // ✅ OBTENER thread_id desde la base de datos
+    const [[runInfo]] = await db.execute(
+      'SELECT thread_id FROM assistant_runs WHERE run_id=? AND client_id=? AND assistant_id=?',
+      [runId, clientId, id]
+    );
+    
+    if (!runInfo) {
+      return res.status(404).json({ 
+        error: 'Run no encontrado',
+        details: 'El run no existe o no pertenece a este cliente/asistente'
+      });
+    }
+
+    const threadId = runInfo.thread_id;
+
+    // ✅ CANCELAR run usando el endpoint correcto
     const response = await axios.post(
-      `https://api.openai.com/v1/threads/runs/${runId}/cancel`,
+      `https://api.openai.com/v1/threads/${threadId}/runs/${runId}/cancel`,
       {},
       { headers: getOpenAIHeaders(true) }
     );
+    
+    // ✅ ACTUALIZAR estado en la base de datos
+    try {
+      await db.execute(
+        'UPDATE assistant_runs SET status=?, updated_at=CURRENT_TIMESTAMP WHERE run_id=? AND client_id=?',
+        ['cancelled', runId, clientId]
+      );
+    } catch (dbError) {
+      console.error('Error actualizando estado del run:', dbError);
+    }
     
     res.json({
       id: response.data.id,
@@ -526,13 +611,22 @@ router.get('/:id/threads/:threadId/conversation', authGuard, async (req, res) =>
   const { limit = 50 } = req.query;
 
   try {
-    // Verificar ownership
+    // Verificar ownership del asistente
     const [[assistant]] = await db.execute(
       'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
       [id, clientId]
     );
     if (!assistant) {
       return res.status(404).json({ error: 'Asistente no encontrado' });
+    }
+
+    // Verificar que el thread pertenece al cliente y asistente
+    const [[threadCheck]] = await db.execute(
+      'SELECT id FROM assistant_runs WHERE thread_id=? AND client_id=? AND assistant_id=? LIMIT 1',
+      [threadId, clientId, id]
+    );
+    if (!threadCheck) {
+      return res.status(404).json({ error: 'Thread no encontrado o sin acceso' });
     }
 
     // Obtener mensajes del thread
@@ -587,13 +681,22 @@ router.post('/:id/threads/:threadId/messages', authGuard, async (req, res) => {
   const { message, file_ids = [] } = req.body;
 
   try {
-    // Verificar ownership
+    // Verificar ownership del asistente
     const [[assistant]] = await db.execute(
       'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
       [id, clientId]
     );
     if (!assistant) {
       return res.status(404).json({ error: 'Asistente no encontrado' });
+    }
+
+    // Verificar que el thread pertenece al cliente y asistente
+    const [[threadCheck]] = await db.execute(
+      'SELECT id FROM assistant_runs WHERE thread_id=? AND client_id=? AND assistant_id=? LIMIT 1',
+      [threadId, clientId, id]
+    );
+    if (!threadCheck) {
+      return res.status(404).json({ error: 'Thread no encontrado o sin acceso' });
     }
 
     // Preparar attachments si hay file_ids
@@ -629,6 +732,22 @@ router.post('/:id/threads/:threadId/messages', authGuard, async (req, res) => {
       { headers: getOpenAIHeaders(true) }
     );
 
+    // ✅ GUARDAR nuevo run en la base de datos
+    try {
+      const runUuid = uuidv4();
+      await db.execute(
+        'INSERT INTO assistant_runs (id, assistant_id, client_id, thread_id, run_id, status) VALUES (?, ?, ?, ?, ?, ?)',
+        [runUuid, id, clientId, threadId, runResponse.data.id, runResponse.data.status]
+      );
+      console.log('Nuevo run guardado en BD:', { 
+        runTableId: runUuid,
+        runId: runResponse.data.id, 
+        threadId 
+      });
+    } catch (dbError) {
+      console.error('Error guardando nuevo run en BD:', dbError);
+    }
+
     res.json({
       message_id: messageResponse.data.id,
       run_id: runResponse.data.id,
@@ -652,7 +771,7 @@ router.delete('/:id/threads/:threadId', authGuard, async (req, res) => {
   const { clientId } = req.auth;
 
   try {
-    // Verificar ownership
+    // Verificar ownership del asistente
     const [[assistant]] = await db.execute(
       'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
       [id, clientId]
@@ -661,10 +780,25 @@ router.delete('/:id/threads/:threadId', authGuard, async (req, res) => {
       return res.status(404).json({ error: 'Asistente no encontrado' });
     }
 
-    // Eliminar thread
+    // Verificar que el thread pertenece al cliente y asistente
+    const [[threadCheck]] = await db.execute(
+      'SELECT id FROM assistant_runs WHERE thread_id=? AND client_id=? AND assistant_id=? LIMIT 1',
+      [threadId, clientId, id]
+    );
+    if (!threadCheck) {
+      return res.status(404).json({ error: 'Thread no encontrado o sin acceso' });
+    }
+
+    // Eliminar thread de OpenAI
     await axios.delete(
       `https://api.openai.com/v1/threads/${threadId}`,
       { headers: getOpenAIHeaders(true) }
+    );
+
+    // ✅ ELIMINAR runs asociados de la base de datos
+    await db.execute(
+      'DELETE FROM assistant_runs WHERE thread_id=? AND client_id=? AND assistant_id=?',
+      [threadId, clientId, id]
     );
 
     res.json({
@@ -678,6 +812,186 @@ router.delete('/:id/threads/:threadId', authGuard, async (req, res) => {
     res.status(500).json({
       error: 'Error eliminando thread',
       details: error.response?.data?.error?.message || error.message
+    });
+  }
+});
+
+// ============== RUTAS ADICIONALES DE UTILIDAD ==============
+
+// 12. GET /assistants/:id/runs (listar runs de un asistente)
+router.get('/:id/runs', authGuard, async (req, res) => {
+  const { id } = req.params;
+  const { clientId } = req.auth;
+  const { limit = 20, status } = req.query;
+
+  try {
+    // Verificar ownership del asistente
+    const [[assistant]] = await db.execute(
+      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
+      [id, clientId]
+    );
+    if (!assistant) {
+      return res.status(404).json({ error: 'Asistente no encontrado' });
+    }
+
+    // Construir query con filtro opcional de status
+    let query = 'SELECT * FROM assistant_runs WHERE assistant_id=? AND client_id=?';
+    let params = [id, clientId];
+    
+    if (status) {
+      query += ' AND status=?';
+      params.push(status);
+    }
+    
+    query += ' ORDER BY created_at DESC LIMIT ?';
+    params.push(parseInt(limit));
+
+    const [runs] = await db.execute(query, params);
+
+    res.json({
+      runs,
+      count: runs.length,
+      assistant_id: id
+    });
+
+  } catch (error) {
+    console.error('Error listando runs:', error);
+    res.status(500).json({
+      error: 'Error listando runs',
+      details: error.message
+    });
+  }
+});
+
+// 13. GET /assistants/:id/threads (listar threads únicos de un asistente)
+router.get('/:id/threads', authGuard, async (req, res) => {
+  const { id } = req.params;
+  const { clientId } = req.auth;
+
+  try {
+    // Verificar ownership del asistente
+    const [[assistant]] = await db.execute(
+      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
+      [id, clientId]
+    );
+    if (!assistant) {
+      return res.status(404).json({ error: 'Asistente no encontrado' });
+    }
+
+    // Obtener threads únicos con información del último run
+    const [threads] = await db.execute(`
+      SELECT 
+        thread_id,
+        COUNT(*) as run_count,
+        MAX(created_at) as last_activity,
+        MAX(CASE WHEN status = 'completed' THEN updated_at END) as last_completed,
+        GROUP_CONCAT(DISTINCT status) as statuses
+      FROM assistant_runs 
+      WHERE assistant_id=? AND client_id=? 
+      GROUP BY thread_id 
+      ORDER BY last_activity DESC
+    `, [id, clientId]);
+
+    res.json({
+      threads: threads.map(thread => ({
+        thread_id: thread.thread_id,
+        run_count: thread.run_count,
+        last_activity: thread.last_activity,
+        last_completed: thread.last_completed,
+        statuses: thread.statuses ? thread.statuses.split(',') : []
+      })),
+      count: threads.length,
+      assistant_id: id
+    });
+
+  } catch (error) {
+    console.error('Error listando threads:', error);
+    res.status(500).json({
+      error: 'Error listando threads',
+      details: error.message
+    });
+  }
+});
+
+// 14. DELETE /assistants/:id/runs/:runId (eliminar run específico - solo de BD local)
+router.delete('/:id/runs/:runId', authGuard, async (req, res) => {
+  const { id, runId } = req.params;
+  const { clientId } = req.auth;
+
+  try {
+    // Verificar ownership del asistente
+    const [[assistant]] = await db.execute(
+      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
+      [id, clientId]
+    );
+    if (!assistant) {
+      return res.status(404).json({ error: 'Asistente no encontrado' });
+    }
+
+    // Eliminar run de la BD local (OpenAI no permite eliminar runs)
+    const [result] = await db.execute(
+      'DELETE FROM assistant_runs WHERE run_id=? AND client_id=? AND assistant_id=?',
+      [runId, clientId, id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Run no encontrado' });
+    }
+
+    res.json({
+      success: true,
+      run_id: runId,
+      deleted_from_local_db: true,
+      note: 'Run eliminado de la base de datos local. Los runs no se pueden eliminar de OpenAI.'
+    });
+
+  } catch (error) {
+    console.error('Error eliminando run:', error);
+    res.status(500).json({
+      error: 'Error eliminando run',
+      details: error.message
+    });
+  }
+});
+
+// 15. POST /assistants/:id/runs/:runId/cleanup (limpiar runs completados antiguos)
+router.post('/:id/cleanup-runs', authGuard, async (req, res) => {
+  const { id } = req.params;
+  const { clientId } = req.auth;
+  const { days_old = 7, status = 'completed' } = req.body;
+
+  try {
+    // Verificar ownership del asistente
+    const [[assistant]] = await db.execute(
+      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
+      [id, clientId]
+    );
+    if (!assistant) {
+      return res.status(404).json({ error: 'Asistente no encontrado' });
+    }
+
+    // Eliminar runs antiguos con el status especificado
+    const [result] = await db.execute(`
+      DELETE FROM assistant_runs 
+      WHERE assistant_id=? AND client_id=? AND status=? 
+      AND created_at < DATE_SUB(NOW(), INTERVAL ? DAY)
+    `, [id, clientId, status, days_old]);
+
+    res.json({
+      success: true,
+      deleted_runs: result.affectedRows,
+      criteria: {
+        assistant_id: id,
+        status,
+        older_than_days: days_old
+      }
+    });
+
+  } catch (error) {
+    console.error('Error limpiando runs:', error);
+    res.status(500).json({
+      error: 'Error limpiando runs',
+      details: error.message
     });
   }
 });
