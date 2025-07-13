@@ -29,10 +29,9 @@ router.post('/:id/files', upload.array('files'), async (req, res) => {
 
     /* 2. Crea (o recupera) vector-store */
     const storeId = await getOrCreateVectorStore(assistant);
-    console.log('Usando vector store:', storeId);
+    console.log('🎯 Usando vector store:', storeId);
 
-    /* 3. Actualiza el asistente para usar el vector store (opcional, no crítico) */
-    await updateAssistantWithVectorStore(assistant, storeId);
+    let assistantUpdated = false;
 
     const results = [];
 
@@ -136,13 +135,34 @@ router.post('/:id/files', upload.array('files'), async (req, res) => {
     const successCount = results.filter(r => r.status === 'success').length;
     const errorCount = results.filter(r => r.status === 'error').length;
 
+    /* 3. Si se subieron archivos exitosamente, asegurar que el asistente esté configurado */
+    if (successCount > 0 && !assistantUpdated) {
+      try {
+        console.log('🔗 Asignando vector store al asistente...');
+        await updateAssistantWithVectorStore(assistant, storeId);
+        assistantUpdated = true;
+        console.log('✅ Asistente configurado correctamente con vector store');
+      } catch (updateError) {
+        console.error('❌ Error asignando vector store al asistente:', updateError.message);
+        // Añadir advertencia a los resultados
+        results.push({
+          filename: 'CONFIGURACIÓN',
+          status: 'warning',
+          error: 'Archivos subidos pero no se pudo asignar el vector store al asistente: ' + updateError.message
+        });
+      }
+    }
+
     res.json({ 
       success: successCount > 0, 
+      assistant_updated: assistantUpdated,
+      vector_store_id: storeId,
       results,
       summary: {
         total: req.files.length,
         success: successCount,
-        errors: errorCount
+        errors: errorCount,
+        assistant_configured: assistantUpdated
       }
     });
     
