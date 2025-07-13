@@ -283,7 +283,7 @@ router.delete('/:id', authGuard, async (req, res) => {
   }
 });
 
-// 5. Crear un run (y thread si no existe)
+// Crear un run (y thread si no existe)
 router.post('/:id/runs', authGuard, async (req, res) => {
   const { id } = req.params; // id local
   const { clientId } = req.auth;
@@ -306,12 +306,28 @@ router.post('/:id/runs', authGuard, async (req, res) => {
       threadId = thread.id;
     }
 
-    // Crear el mensaje en el thread usando SDK
-    await openai.beta.threads.messages.create(threadId, {
+    // Preparar attachments si hay file_ids (formato API v2)
+    let attachments = [];
+    if (file_ids && file_ids.length > 0) {
+      attachments = file_ids.map(fileId => ({
+        file_id: fileId,
+        tools: [{ type: "file_search" }, { type: "code_interpreter" }]
+      }));
+    }
+
+    // Preparar payload del mensaje
+    const messagePayload = {
       role: "user",
-      content: message,
-      file_ids: file_ids || []
-    });
+      content: message
+    };
+
+    // Solo agregar attachments si hay archivos
+    if (attachments.length > 0) {
+      messagePayload.attachments = attachments;
+    }
+
+    // Crear el mensaje en el thread usando SDK
+    await openai.beta.threads.messages.create(threadId, messagePayload);
 
     // Crear el run usando SDK
     const run = await openai.beta.threads.runs.create(threadId, {
@@ -496,6 +512,8 @@ router.get('/:id', authGuard, async (req, res) => {
   }
 });
 
+/// Agregar estas rutas al final de routes/OpenAI.js, antes del module.exports
+
 // ============== RUTAS PARA TESTING DE ASISTENTES (RUNS) ==============
 
 // 10. Crear un thread y enviar mensaje (todo en uno)
@@ -523,12 +541,27 @@ router.post('/:id/chat', authGuard, async (req, res) => {
       console.log('Nuevo thread creado:', threadId);
     }
 
+    // Preparar attachments si hay file_ids (formato API v2)
+    let attachments = [];
+    if (file_ids && file_ids.length > 0) {
+      attachments = file_ids.map(fileId => ({
+        file_id: fileId,
+        tools: [{ type: "file_search" }, { type: "code_interpreter" }]
+      }));
+    }
+
     // Agregar mensaje al thread
-    await openai.beta.threads.messages.create(threadId, {
+    const messagePayload = {
       role: "user",
-      content: message,
-      file_ids: file_ids
-    });
+      content: message
+    };
+
+    // Solo agregar attachments si hay archivos
+    if (attachments.length > 0) {
+      messagePayload.attachments = attachments;
+    }
+
+    await openai.beta.threads.messages.create(threadId, messagePayload);
 
     // Crear y ejecutar run
     const run = await openai.beta.threads.runs.create(threadId, {
@@ -610,7 +643,7 @@ router.get('/:id/runs/:runId/status', authGuard, async (req, res) => {
           id: msg.id,
           content: msg.content,
           created_at: msg.created_at,
-          file_ids: msg.file_ids
+          attachments: msg.attachments || []
         }));
 
       } catch (msgError) {
@@ -681,7 +714,7 @@ router.get('/:id/threads/:threadId/conversation', authGuard, async (req, res) =>
         return content;
       }),
       created_at: msg.created_at,
-      file_ids: msg.file_ids || []
+      attachments: msg.attachments || []
     }));
 
     res.json({
@@ -716,12 +749,27 @@ router.post('/:id/threads/:threadId/messages', authGuard, async (req, res) => {
       return res.status(404).json({ error: 'Asistente no encontrado' });
     }
 
-    // Agregar mensaje al thread
-    const threadMessage = await openai.beta.threads.messages.create(threadId, {
+    // Preparar attachments si hay file_ids
+    let attachments = [];
+    if (file_ids && file_ids.length > 0) {
+      attachments = file_ids.map(fileId => ({
+        file_id: fileId,
+        tools: [{ type: "file_search" }, { type: "code_interpreter" }]
+      }));
+    }
+
+    // Preparar payload del mensaje
+    const messagePayload = {
       role: "user",
-      content: message,
-      file_ids: file_ids
-    });
+      content: message
+    };
+
+    if (attachments.length > 0) {
+      messagePayload.attachments = attachments;
+    }
+
+    // Agregar mensaje al thread
+    const threadMessage = await openai.beta.threads.messages.create(threadId, messagePayload);
 
     // Crear nuevo run
     const run = await openai.beta.threads.runs.create(threadId, {
