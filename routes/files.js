@@ -5,7 +5,7 @@ const axios    = require('axios');
 const FormData = require('form-data');
 const db       = require('../db');
 const authGuard = require('../middlewares/authGuard');
-const { getOrCreateVectorStore, listVectorStoreFiles } = require('../helpers/vectorStore');
+const { getOrCreateVectorStore, updateAssistantWithVectorStore, listVectorStoreFiles } = require('../helpers/vectorStore');
 
 const router = express.Router();
 const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } }); // 25 MB
@@ -30,6 +30,9 @@ router.post('/:id/files', upload.array('files'), async (req, res) => {
     /* 2. Crea (o recupera) vector-store */
     const storeId = await getOrCreateVectorStore(assistant);
     console.log('Usando vector store:', storeId);
+
+    /* 3. Actualiza el asistente para usar el vector store (opcional, no crítico) */
+    await updateAssistantWithVectorStore(assistant, storeId);
 
     const results = [];
 
