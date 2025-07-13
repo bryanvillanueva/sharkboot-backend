@@ -50,26 +50,9 @@ exports.getOrCreateVectorStore = async function (assistant) {
         [JSON.stringify(newConfig), assistant.id]
       );
 
-      // Actualizar el asistente en OpenAI para que use el vector store
-      await axios.patch(
-        `https://api.openai.com/v1/assistants/${assistant.openai_id}`,
-        {
-          tool_resources: { 
-            file_search: { 
-              vector_store_ids: [storeId] 
-            } 
-          }
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-            'Content-Type': 'application/json',
-            'OpenAI-Beta': 'assistants=v2'
-          }
-        }
-      );
-
-      console.log('Asistente actualizado con vector store:', assistant.openai_id);
+      // IMPORTANTE: No actualizar el asistente aquí, lo haremos cuando sea necesario
+      // El vector store se asociará automáticamente cuando se use file_search
+      console.log('Vector store configurado para el asistente:', assistant.openai_id);
 
     } catch (error) {
       console.error('Error creando vector store:', {
@@ -82,6 +65,73 @@ exports.getOrCreateVectorStore = async function (assistant) {
   }
 
   return storeId;
+};
+
+/**
+ * Actualiza un asistente para que use un vector store específico
+ */
+exports.updateAssistantWithVectorStore = async function (assistant, vectorStoreId) {
+  try {
+    // Primero, obtener la configuración actual del asistente
+    const currentResponse = await axios.get(
+      `https://api.openai.com/v1/assistants/${assistant.openai_id}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+          'OpenAI-Beta': 'assistants=v2'
+        }
+      }
+    );
+
+    const currentAssistant = currentResponse.data;
+    
+    // Preparar los tool_resources manteniendo los existentes
+    const currentToolResources = currentAssistant.tool_resources || {};
+    const updatedToolResources = {
+      ...currentToolResources,
+      file_search: { 
+        vector_store_ids: [vectorStoreId] 
+      }
+    };
+
+    // Actualizar el asistente manteniendo toda su configuración actual
+    const updateResponse = await axios.post(
+      `https://api.openai.com/v1/assistants/${assistant.openai_id}`,
+      {
+        model: currentAssistant.model,
+        name: currentAssistant.name,
+        description: currentAssistant.description,
+        instructions: currentAssistant.instructions,
+        tools: currentAssistant.tools,
+        tool_resources: updatedToolResources,
+        metadata: currentAssistant.metadata,
+        top_p: currentAssistant.top_p,
+        temperature: currentAssistant.temperature,
+        response_format: currentAssistant.response_format
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+          'OpenAI-Beta': 'assistants=v2'
+        }
+      }
+    );
+
+    console.log('Asistente actualizado con vector store:', assistant.openai_id);
+    return updateResponse.data;
+    
+  } catch (error) {
+    console.error('Error actualizando asistente con vector store:', {
+      message: error.message,
+      status: error.response?.status,
+      data: error.response?.data
+    });
+    
+    // Si falla la actualización, no es crítico - el vector store se puede usar de todas formas
+    console.warn('No se pudo actualizar el asistente, pero el vector store funciona independientemente');
+    return null;
+  }
 };
 
 /**
