@@ -14,8 +14,11 @@ exports.getOrCreateVectorStore = async function (assistant) {
   }
 
   if (!storeId) {
-    const vs = await openai.beta.vectorStores.create({ name: `vs_${assistant.id}` });
-    storeId = vs.id;
+    // En OpenAI SDK v5, los vector stores se crean a través de la API de assistants
+    const vectorStore = await openai.beta.assistants.vectorStores.create({
+      name: `vs_${assistant.id}`
+    });
+    storeId = vectorStore.id;
 
     // Actualiza tool_config en BD
     const newConfig = {

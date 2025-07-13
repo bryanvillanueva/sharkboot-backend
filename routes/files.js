@@ -37,7 +37,7 @@ router.post('/:id/files', upload.array('files'), async (req, res) => {
       });
 
       /* B. Asocia al vector store */
-      await openai.beta.vectorStores.files.create(storeId, { file_id: uploadResult.id });
+      await openai.beta.assistants.vectorStores.files.create(storeId, { file_id: uploadResult.id });
 
       /* C. Guarda metadatos locales */
       await db.execute(
@@ -93,7 +93,7 @@ router.delete('/:id/files/:fileId', async (req, res) => {
 
   try {
     /* A. Quita del vector store (OpenAI) */
-    await openai.beta.vectorStores.files.del(storeId, fileId);
+    await openai.beta.assistants.vectorStores.files.del(storeId, fileId);
 
     /* B. Elimina metadatos locales */
     await db.execute('DELETE FROM assistant_files WHERE assistant_id=? AND openai_file=?', [id, fileId]);
