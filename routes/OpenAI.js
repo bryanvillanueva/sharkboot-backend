@@ -112,7 +112,7 @@ router.get('/', authGuard, async (req, res) => {
   }
 });
 
-// 3. PATCH /assistants/:id (editar)
+// 3. PATCH /assistants/:id (editar) - CORREGIDO
 router.patch('/:id', authGuard, async (req, res) => {
   const { clientId } = req.auth;
   const { id } = req.params;
@@ -160,8 +160,8 @@ router.patch('/:id', authGuard, async (req, res) => {
       updateData.tool_resources = tool_resources;
     }
 
-    // Actualizar en OpenAI usando axios
-    await axios.patch(
+    // ✅ CORREGIDO: Usar POST en lugar de PATCH para modificar asistentes en OpenAI
+    await axios.post(
       `https://api.openai.com/v1/assistants/${row.openai_id}`,
       updateData,
       { headers: getOpenAIHeaders(true) }
