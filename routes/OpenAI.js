@@ -3,11 +3,10 @@ const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 const db = require('../db');
 const authGuard = require('../middlewares/authGuard');
-const { openai } = require('../helpers/openai'); // Mantenemos para threads/runs
 
 const router = express.Router();
 
-// Headers para las peticiones a OpenAI
+// Headers helper para OpenAI
 const getOpenAIHeaders = (includeBeta = false) => {
   const headers = {
     'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
@@ -21,13 +20,15 @@ const getOpenAIHeaders = (includeBeta = false) => {
   return headers;
 };
 
+// ============== GESTIÓN DE ASISTENTES ==============
+
 // 1. POST /assistants (creación)
 router.post('/', authGuard, async (req, res) => {
   const { clientId } = req.auth;
   const { name, instructions, model, tool_config } = req.body;
 
   try {
-    // Prepara tool_resources asegurando code_interpreter.file_ids: []
+    // Preparar tool_resources
     let tool_resources = {};
     
     if (tool_config?.code_interpreter) {
@@ -86,12 +87,7 @@ router.post('/', authGuard, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Error creando asistente:', {
-      message: error.message,
-      status: error.response?.status,
-      data: error.response?.data
-    });
-    
+    console.error('Error creando asistente:', error.response?.data || error.message);
     res.status(500).json({ 
       error: 'No se pudo crear el asistente',
       details: error.response?.data?.error?.message || error.message
@@ -125,14 +121,14 @@ router.patch('/:id', authGuard, async (req, res) => {
   try {
     // Verificar ownership
     const [[row]] = await db.execute(
-      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
+      'SELECT openai_id, tool_config FROM assistants WHERE id=? AND client_id=?',
       [id, clientId]
     );
     if (!row) {
       return res.status(404).json({ error: 'Asistente no encontrado' });
     }
 
-    // Prepara tool_resources
+    // Preparar tool_resources manteniendo vector stores existentes
     let tool_resources = {};
     
     if (tool_config?.code_interpreter) {
@@ -140,15 +136,7 @@ router.patch('/:id', authGuard, async (req, res) => {
     }
     
     if (tool_config?.file_search) {
-      // Mantener vector stores existentes si los hay
-      const [existingConfig] = await db.execute(
-        'SELECT tool_config FROM assistants WHERE id=?',
-        [id]
-      );
-      
-      const existing = existingConfig[0]?.tool_config ? 
-        JSON.parse(existingConfig[0].tool_config) : {};
-        
+      const existing = row.tool_config ? JSON.parse(row.tool_config) : {};
       tool_resources.file_search = { 
         vector_store_ids: existing.file_search?.vector_store_ids || [] 
       };
@@ -161,7 +149,6 @@ router.patch('/:id', authGuard, async (req, res) => {
       tools: []
     };
 
-    // Agregar herramientas según configuración
     if (tool_config?.code_interpreter) {
       updateData.tools.push({ type: "code_interpreter" });
     }
@@ -174,7 +161,7 @@ router.patch('/:id', authGuard, async (req, res) => {
     }
 
     // Actualizar en OpenAI usando axios
-    await axios.patch(
+    await axios.post(
       `https://api.openai.com/v1/assistants/${row.openai_id}`,
       updateData,
       { headers: getOpenAIHeaders(true) }
@@ -195,12 +182,7 @@ router.patch('/:id', authGuard, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Error actualizando asistente:', {
-      message: error.message,
-      status: error.response?.status,
-      data: error.response?.data
-    });
-    
+    console.error('Error actualizando asistente:', error.response?.data || error.message);
     res.status(500).json({ 
       error: 'No se pudo actualizar el asistente',
       details: error.response?.data?.error?.message || error.message
@@ -283,192 +265,7 @@ router.delete('/:id', authGuard, async (req, res) => {
   }
 });
 
-// Crear un run (y thread si no existe)
-router.post('/:id/runs', authGuard, async (req, res) => {
-  const { id } = req.params; // id local
-  const { clientId } = req.auth;
-  const { thread_id, message, file_ids } = req.body;
-
-  try {
-    // Buscar openai_id
-    const [[assistant]] = await db.execute(
-      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
-      [id, clientId]
-    );
-    if (!assistant) {
-      return res.status(404).json({ error: 'Asistente no encontrado' });
-    }
-
-    // Si no hay thread, créalo usando SDK (más estable para threads)
-    let threadId = thread_id;
-    if (!threadId) {
-      const thread = await openai.beta.threads.create();
-      threadId = thread.id;
-    }
-
-    // Preparar attachments si hay file_ids (formato API v2)
-    let attachments = [];
-    if (file_ids && file_ids.length > 0) {
-      attachments = file_ids.map(fileId => ({
-        file_id: fileId,
-        tools: [{ type: "file_search" }, { type: "code_interpreter" }]
-      }));
-    }
-
-    // Preparar payload del mensaje
-    const messagePayload = {
-      role: "user",
-      content: message
-    };
-
-    // Solo agregar attachments si hay archivos
-    if (attachments.length > 0) {
-      messagePayload.attachments = attachments;
-    }
-
-    // Crear el mensaje en el thread usando SDK
-    await openai.beta.threads.messages.create(threadId, messagePayload);
-
-    // Crear el run usando SDK
-    const run = await openai.beta.threads.runs.create(threadId, {
-      assistant_id: assistant.openai_id
-    });
-
-    res.json({ 
-      runId: run.id, 
-      threadId,
-      status: run.status
-    });
-    
-  } catch (error) {
-    console.error('Error creando run:', error);
-    res.status(500).json({ 
-      error: 'Error creando run',
-      details: error.message
-    });
-  }
-});
-
-// 6. Obtener el estado y resultado de un run
-router.get('/:id/runs/:runId', authGuard, async (req, res) => {
-  const { id, runId } = req.params;
-  const { clientId } = req.auth;
-
-  try {
-    // Verificar ownership del asistente
-    const [[assistant]] = await db.execute(
-      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
-      [id, clientId]
-    );
-    if (!assistant) {
-      return res.status(404).json({ error: 'Asistente no encontrado' });
-    }
-
-    // Obtener run usando SDK (más estable)
-    const run = await openai.beta.threads.runs.retrieve(runId);
-    
-    res.json({
-      id: run.id,
-      status: run.status,
-      created_at: run.created_at,
-      completed_at: run.completed_at,
-      failed_at: run.failed_at,
-      last_error: run.last_error,
-      thread_id: run.thread_id
-    });
-    
-  } catch (error) {
-    console.error('Error obteniendo run:', error);
-    if (error.status === 404) {
-      res.status(404).json({ error: 'Run no encontrado' });
-    } else {
-      res.status(500).json({ 
-        error: 'Error obteniendo run',
-        details: error.message
-      });
-    }
-  }
-});
-
-// 7. Obtener los mensajes del thread asociados al run
-router.get('/:id/runs/:runId/messages', authGuard, async (req, res) => {
-  const { id, runId } = req.params;
-  const { clientId } = req.auth;
-
-  try {
-    // Verificar ownership del asistente
-    const [[assistant]] = await db.execute(
-      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
-      [id, clientId]
-    );
-    if (!assistant) {
-      return res.status(404).json({ error: 'Asistente no encontrado' });
-    }
-
-    // Buscar el run para obtener el threadId usando SDK
-    const run = await openai.beta.threads.runs.retrieve(runId);
-    const threadId = run.thread_id;
-
-    // Listar los mensajes del thread usando SDK
-    const messages = await openai.beta.threads.messages.list(threadId, {
-      order: 'desc',
-      limit: 100
-    });
-
-    res.json({
-      messages: messages.data,
-      thread_id: threadId,
-      run_id: runId,
-      count: messages.data.length
-    });
-    
-  } catch (error) {
-    console.error('Error obteniendo mensajes:', error);
-    if (error.status === 404) {
-      res.status(404).json({ error: 'Run o thread no encontrado' });
-    } else {
-      res.status(500).json({ 
-        error: 'Error obteniendo mensajes',
-        details: error.message
-      });
-    }
-  }
-});
-
-// 8. Cancelar un run
-router.post('/:id/runs/:runId/cancel', authGuard, async (req, res) => {
-  const { id, runId } = req.params;
-  const { clientId } = req.auth;
-
-  try {
-    // Verificar ownership
-    const [[assistant]] = await db.execute(
-      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
-      [id, clientId]
-    );
-    if (!assistant) {
-      return res.status(404).json({ error: 'Asistente no encontrado' });
-    }
-
-    // Cancelar run usando SDK
-    const run = await openai.beta.threads.runs.cancel(runId);
-    
-    res.json({
-      id: run.id,
-      status: run.status,
-      cancelled_at: new Date().toISOString()
-    });
-    
-  } catch (error) {
-    console.error('Error cancelando run:', error);
-    res.status(500).json({ 
-      error: 'Error cancelando run',
-      details: error.message
-    });
-  }
-});
-
-// 9. Obtener información detallada de un asistente
+// 5. GET /assistants/:id (información detallada)
 router.get('/:id', authGuard, async (req, res) => {
   const { id } = req.params;
   const { clientId } = req.auth;
@@ -512,11 +309,9 @@ router.get('/:id', authGuard, async (req, res) => {
   }
 });
 
-/// Agregar estas rutas al final de routes/OpenAI.js, antes del module.exports
+// ============== RUNS Y CHAT ==============
 
-// ============== RUTAS PARA TESTING DE ASISTENTES (RUNS) ==============
-
-// 10. Crear un thread y enviar mensaje (todo en uno)
+// 6. POST /assistants/:id/chat (crear thread + mensaje + run)
 router.post('/:id/chat', authGuard, async (req, res) => {
   const { id } = req.params;
   const { clientId } = req.auth;
@@ -536,12 +331,16 @@ router.post('/:id/chat', authGuard, async (req, res) => {
 
     // Crear thread si no existe
     if (!threadId) {
-      const thread = await openai.beta.threads.create();
-      threadId = thread.id;
+      const threadResponse = await axios.post(
+        'https://api.openai.com/v1/threads',
+        {},
+        { headers: getOpenAIHeaders(true) }
+      );
+      threadId = threadResponse.data.id;
       console.log('Nuevo thread creado:', threadId);
     }
 
-    // Preparar attachments si hay file_ids (formato API v2)
+    // Preparar attachments si hay file_ids
     let attachments = [];
     if (file_ids && file_ids.length > 0) {
       attachments = file_ids.map(fileId => ({
@@ -550,23 +349,31 @@ router.post('/:id/chat', authGuard, async (req, res) => {
       }));
     }
 
-    // Agregar mensaje al thread
+    // Preparar payload del mensaje
     const messagePayload = {
       role: "user",
       content: message
     };
 
-    // Solo agregar attachments si hay archivos
     if (attachments.length > 0) {
       messagePayload.attachments = attachments;
     }
 
-    await openai.beta.threads.messages.create(threadId, messagePayload);
+    // Crear mensaje
+    await axios.post(
+      `https://api.openai.com/v1/threads/${threadId}/messages`,
+      messagePayload,
+      { headers: getOpenAIHeaders(true) }
+    );
 
     // Crear y ejecutar run
-    const run = await openai.beta.threads.runs.create(threadId, {
-      assistant_id: assistant.openai_id
-    });
+    const runResponse = await axios.post(
+      `https://api.openai.com/v1/threads/${threadId}/runs`,
+      { assistant_id: assistant.openai_id },
+      { headers: getOpenAIHeaders(true) }
+    );
+
+    const run = runResponse.data;
 
     console.log('Run creado:', {
       runId: run.id,
@@ -585,12 +392,12 @@ router.post('/:id/chat', authGuard, async (req, res) => {
     console.error('Error en chat:', error);
     res.status(500).json({
       error: 'Error procesando mensaje',
-      details: error.message
+      details: error.response?.data?.error?.message || error.message
     });
   }
 });
 
-// 11. Obtener estado detallado de un run con polling
+// 7. GET /assistants/:id/runs/:runId/status (polling de estado)
 router.get('/:id/runs/:runId/status', authGuard, async (req, res) => {
   const { id, runId } = req.params;
   const { clientId } = req.auth;
@@ -606,7 +413,12 @@ router.get('/:id/runs/:runId/status', authGuard, async (req, res) => {
     }
 
     // Obtener run
-    const run = await openai.beta.threads.runs.retrieve(runId);
+    const runResponse = await axios.get(
+      `https://api.openai.com/v1/threads/runs/${runId}`,
+      { headers: getOpenAIHeaders(true) }
+    );
+
+    const run = runResponse.data;
     
     let response = {
       id: run.id,
@@ -625,16 +437,15 @@ router.get('/:id/runs/:runId/status', authGuard, async (req, res) => {
       last_error: run.last_error
     };
 
-    // Si el run está completado, obtener también los mensajes más recientes
+    // Si el run está completado, obtener mensajes más recientes
     if (run.status === 'completed') {
       try {
-        const messages = await openai.beta.threads.messages.list(run.thread_id, {
-          order: 'desc',
-          limit: 10
-        });
+        const messagesResponse = await axios.get(
+          `https://api.openai.com/v1/threads/${run.thread_id}/messages?order=desc&limit=10`,
+          { headers: getOpenAIHeaders(true) }
+        );
         
-        // Filtrar solo los mensajes del asistente más recientes
-        const assistantMessages = messages.data.filter(msg => 
+        const assistantMessages = messagesResponse.data.data.filter(msg => 
           msg.role === 'assistant' && 
           msg.created_at >= run.created_at
         );
@@ -652,7 +463,6 @@ router.get('/:id/runs/:runId/status', authGuard, async (req, res) => {
       }
     }
 
-    // Si el run requiere acción, incluir detalles
     if (run.status === 'requires_action') {
       response.required_action = run.required_action;
     }
@@ -661,18 +471,55 @@ router.get('/:id/runs/:runId/status', authGuard, async (req, res) => {
 
   } catch (error) {
     console.error('Error obteniendo estado del run:', error);
-    if (error.status === 404) {
+    if (error.response?.status === 404) {
       res.status(404).json({ error: 'Run no encontrado' });
     } else {
       res.status(500).json({
         error: 'Error obteniendo estado del run',
-        details: error.message
+        details: error.response?.data?.error?.message || error.message
       });
     }
   }
 });
 
-// 12. Obtener conversación completa de un thread
+// 8. POST /assistants/:id/runs/:runId/cancel (cancelar run)
+router.post('/:id/runs/:runId/cancel', authGuard, async (req, res) => {
+  const { id, runId } = req.params;
+  const { clientId } = req.auth;
+
+  try {
+    // Verificar ownership
+    const [[assistant]] = await db.execute(
+      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
+      [id, clientId]
+    );
+    if (!assistant) {
+      return res.status(404).json({ error: 'Asistente no encontrado' });
+    }
+
+    // Cancelar run
+    const response = await axios.post(
+      `https://api.openai.com/v1/threads/runs/${runId}/cancel`,
+      {},
+      { headers: getOpenAIHeaders(true) }
+    );
+    
+    res.json({
+      id: response.data.id,
+      status: response.data.status,
+      cancelled_at: response.data.cancelled_at
+    });
+    
+  } catch (error) {
+    console.error('Error cancelando run:', error);
+    res.status(500).json({ 
+      error: 'Error cancelando run',
+      details: error.response?.data?.error?.message || error.message
+    });
+  }
+});
+
+// 9. GET /assistants/:id/threads/:threadId/conversation (conversación completa)
 router.get('/:id/threads/:threadId/conversation', authGuard, async (req, res) => {
   const { id, threadId } = req.params;
   const { clientId } = req.auth;
@@ -689,13 +536,13 @@ router.get('/:id/threads/:threadId/conversation', authGuard, async (req, res) =>
     }
 
     // Obtener mensajes del thread
-    const messages = await openai.beta.threads.messages.list(threadId, {
-      order: 'asc', // Orden cronológico
-      limit: parseInt(limit)
-    });
+    const messagesResponse = await axios.get(
+      `https://api.openai.com/v1/threads/${threadId}/messages?order=asc&limit=${limit}`,
+      { headers: getOpenAIHeaders(true) }
+    );
 
     // Formatear mensajes para el frontend
-    const conversation = messages.data.map(msg => ({
+    const conversation = messagesResponse.data.data.map(msg => ({
       id: msg.id,
       role: msg.role,
       content: msg.content.map(content => {
@@ -721,19 +568,19 @@ router.get('/:id/threads/:threadId/conversation', authGuard, async (req, res) =>
       thread_id: threadId,
       messages: conversation,
       count: conversation.length,
-      has_more: messages.has_more
+      has_more: messagesResponse.data.has_more
     });
 
   } catch (error) {
     console.error('Error obteniendo conversación:', error);
     res.status(500).json({
       error: 'Error obteniendo conversación',
-      details: error.message
+      details: error.response?.data?.error?.message || error.message
     });
   }
 });
 
-// 13. Enviar mensaje adicional a un thread existente
+// 10. POST /assistants/:id/threads/:threadId/messages (enviar mensaje adicional)
 router.post('/:id/threads/:threadId/messages', authGuard, async (req, res) => {
   const { id, threadId } = req.params;
   const { clientId } = req.auth;
@@ -769,31 +616,37 @@ router.post('/:id/threads/:threadId/messages', authGuard, async (req, res) => {
     }
 
     // Agregar mensaje al thread
-    const threadMessage = await openai.beta.threads.messages.create(threadId, messagePayload);
+    const messageResponse = await axios.post(
+      `https://api.openai.com/v1/threads/${threadId}/messages`,
+      messagePayload,
+      { headers: getOpenAIHeaders(true) }
+    );
 
     // Crear nuevo run
-    const run = await openai.beta.threads.runs.create(threadId, {
-      assistant_id: assistant.openai_id
-    });
+    const runResponse = await axios.post(
+      `https://api.openai.com/v1/threads/${threadId}/runs`,
+      { assistant_id: assistant.openai_id },
+      { headers: getOpenAIHeaders(true) }
+    );
 
     res.json({
-      message_id: threadMessage.id,
-      run_id: run.id,
+      message_id: messageResponse.data.id,
+      run_id: runResponse.data.id,
       thread_id: threadId,
-      status: run.status,
-      created_at: run.created_at
+      status: runResponse.data.status,
+      created_at: runResponse.data.created_at
     });
 
   } catch (error) {
     console.error('Error enviando mensaje:', error);
     res.status(500).json({
       error: 'Error enviando mensaje',
-      details: error.message
+      details: error.response?.data?.error?.message || error.message
     });
   }
 });
 
-// 14. Eliminar un thread completo
+// 11. DELETE /assistants/:id/threads/:threadId (eliminar thread completo)
 router.delete('/:id/threads/:threadId', authGuard, async (req, res) => {
   const { id, threadId } = req.params;
   const { clientId } = req.auth;
@@ -809,7 +662,10 @@ router.delete('/:id/threads/:threadId', authGuard, async (req, res) => {
     }
 
     // Eliminar thread
-    await openai.beta.threads.del(threadId);
+    await axios.delete(
+      `https://api.openai.com/v1/threads/${threadId}`,
+      { headers: getOpenAIHeaders(true) }
+    );
 
     res.json({
       success: true,
@@ -821,53 +677,9 @@ router.delete('/:id/threads/:threadId', authGuard, async (req, res) => {
     console.error('Error eliminando thread:', error);
     res.status(500).json({
       error: 'Error eliminando thread',
-      details: error.message
+      details: error.response?.data?.error?.message || error.message
     });
   }
 });
-
-// 15. Obtener información de un thread
-router.get('/:id/threads/:threadId', authGuard, async (req, res) => {
-  const { id, threadId } = req.params;
-  const { clientId } = req.auth;
-
-  try {
-    // Verificar ownership
-    const [[assistant]] = await db.execute(
-      'SELECT openai_id FROM assistants WHERE id=? AND client_id=?',
-      [id, clientId]
-    );
-    if (!assistant) {
-      return res.status(404).json({ error: 'Asistente no encontrado' });
-    }
-
-    // Obtener thread
-    const thread = await openai.beta.threads.retrieve(threadId);
-
-    // Obtener conteo de mensajes
-    const messages = await openai.beta.threads.messages.list(threadId, { limit: 1 });
-    
-    res.json({
-      id: thread.id,
-      created_at: thread.created_at,
-      metadata: thread.metadata,
-      message_count: messages.data.length,
-      last_message_at: messages.data[0]?.created_at
-    });
-
-  } catch (error) {
-    console.error('Error obteniendo thread:', error);
-    if (error.status === 404) {
-      res.status(404).json({ error: 'Thread no encontrado' });
-    } else {
-      res.status(500).json({
-        error: 'Error obteniendo thread',
-        details: error.message
-      });
-    }
-  }
-});
-
-// ============== FIN DE RUTAS PARA TESTING ==============
 
 module.exports = router;
