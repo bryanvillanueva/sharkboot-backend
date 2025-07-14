@@ -7,6 +7,7 @@ const db        = require('../db');
 const { sign, verify } = require('../helpers/jwt');
 
 const router = express.Router();
+const authGuard = require('../middlewares/authGuard');
 
 /*---------------------------------------------------------------
   1) REGISTRO POR E-MAIL
@@ -182,61 +183,270 @@ const ALLOWED_REDIRECTS = [
     
     res.redirect(facebookAuthUrl);
   });
+
 /*---------------------------------------------------------------
-   4) CALLBACK Facebook - Callback que maneja la respuesta de Facebook
+  ENDPOINT PARA VINCULAR FACEBOOK - Para usuarios ya logueados
   -------------------------------------------------------------*/
+
+router.get('/facebook/link', authGuard, (req, res) => {
+  console.log('🔗 Iniciando vinculación de Facebook para usuario logueado');
+  
+  if (!process.env.FACEBOOK_APP_ID) {
+    console.error('❌ FACEBOOK_APP_ID no está configurado');
+    return res.redirect('/dashboard?error=facebook_not_configured');
+  }
+
+  // Obtener datos del usuario autenticado del middleware
+  const { userId } = req.auth; // Viene del authGuard
+  const frontendUrl = req.query.frontend_url || req.get('Referer') || 'http://localhost:5173';
+  
+  console.log('👤 Usuario logueado solicitando vinculación:', userId);
+
+  // Construir estado con información de vinculación
+  const state = encodeURIComponent(JSON.stringify({
+    timestamp: Date.now(),
+    source: 'link_facebook',
+    frontend_url: frontendUrl,
+    linkToUserId: userId // ← ESTE ES EL IDENTIFICADOR CLAVE
+  }));
+
+  // Usar los mismos permisos que el registro normal
+  const scopes = [
+    'instagram_manage_events',
+    'page_events',
+    'ads_management',
+    'ads_read',
+    'business_management',
+    'catalog_management',
+    'commerce_account_manage_orders',
+    'commerce_account_read_orders',
+    'commerce_account_read_reports',
+    'commerce_account_read_settings',
+    'instagram_basic',
+    'whatsapp_business_messaging',
+    'whatsapp_business_management',
+    'whatsapp_business_manage_events',
+    'read_page_mailboxes',
+    'read_insights',
+    'publish_video',
+    'pages_show_list',
+    'pages_read_user_content',
+    'pages_read_engagement',
+    'pages_messaging',
+    'pages_manage_posts',
+    'pages_manage_metadata',
+    'pages_manage_instant_articles',
+    'pages_manage_engagement',
+    'pages_manage_ads',
+    'pages_manage_cta',
+    'manage_fundraisers',
+    'leads_retrieval',
+    'instagram_shopping_tag_products',
+    'instagram_manage_messages',
+    'instagram_manage_insights',
+    'instagram_branded_content_ads_brand',
+    'instagram_branded_content_brand',
+    'instagram_branded_content_creator',
+    'instagram_content_publish',
+    'instagram_manage_comments',
+    'email',
+    'public_profile'
+  ].join(',');
+
+  const redirectUri = 'https://sharkboot-backend-production.up.railway.app/auth/facebook/callback';
+
+  // Construir URL de Facebook (misma estructura que el registro)
+  const facebookAuthUrl = 'https://www.facebook.com/v23.0/dialog/oauth' +
+    `?client_id=${process.env.FACEBOOK_APP_ID}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&scope=${scopes}` +
+    `&state=${state}` +
+    `&response_type=code`;
+
+  console.log('✅ Redirigiendo a Facebook para vinculación...');
+  console.log('🔍 Usuario a vincular:', userId);
+  console.log('🔍 Frontend URL:', frontendUrl);
+  
+  res.redirect(facebookAuthUrl);
+});
+
+/*---------------------------------------------------------------
+  ENDPOINT PARA VERIFICAR ESTADO DE VINCULACIÓN
+  -------------------------------------------------------------*/
+router.get('/facebook/status', authGuard, async (req, res) => {
+  try {
+    const { userId } = req.auth;
+    
+    // Verificar si el usuario tiene Facebook vinculado
+    const [[facebookProvider]] = await db.execute(
+      'SELECT provider_id, created_at FROM user_providers WHERE user_id = ? AND provider = "FACEBOOK"',
+      [userId]
+    );
+    
+    if (facebookProvider) {
+      res.json({
+        linked: true,
+        facebook_id: facebookProvider.provider_id,
+        linked_at: facebookProvider.created_at
+      });
+    } else {
+      res.json({
+        linked: false
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ Error verificando estado de Facebook:', error.message);
+    res.status(500).json({ error: 'Error verificando estado de vinculación' });
+  }
+});
+
+/*---------------------------------------------------------------
+  ENDPOINT PARA DESVINCULAR FACEBOOK
+  -------------------------------------------------------------*/
+router.delete('/facebook/unlink', authGuard, async (req, res) => {
+  try {
+    const { userId } = req.auth;
+    
+    // Eliminar la vinculación de Facebook
+    const [result] = await db.execute(
+      'DELETE FROM user_providers WHERE user_id = ? AND provider = "FACEBOOK"',
+      [userId]
+    );
+    
+    if (result.affectedRows > 0) {
+      console.log('✅ Facebook desvinculado para usuario:', userId);
+      res.json({ success: true, message: 'Facebook desvinculado correctamente' });
+    } else {
+      res.status(404).json({ error: 'No se encontró vinculación de Facebook' });
+    }
+    
+  } catch (error) {
+    console.error('❌ Error desvinculando Facebook:', error.message);
+    res.status(500).json({ error: 'Error desvinculando Facebook' });
+  }
+});
+
 /*---------------------------------------------------------------
    CALLBACK Facebook COMPLETO - v23.0 (igual que CRM)
   -------------------------------------------------------------*/
-  router.get('/facebook/callback', async (req, res) => {
-    try {
-      const { code, state, error, error_description } = req.query;
+ /*---------------------------------------------------------------
+   CALLBACK Facebook COMPLETO - 2 ESCENARIOS
+  -------------------------------------------------------------*/
+router.get('/facebook/callback', async (req, res) => {
+  try {
+    const { code, state, error, error_description } = req.query;
+    
+    // Manejar errores de Facebook
+    if (error) {
+      console.error('❌ Error de Facebook:', error, error_description);
+      const stateData = state ? JSON.parse(decodeURIComponent(state)) : {};
+      const frontendUrl = stateData?.frontend_url || 'http://localhost:5173';
+      return res.redirect(`${frontendUrl}/login?error=${error}&error_description=${encodeURIComponent(error_description || 'Error desconocido')}`);
+    }
+
+    const stateData = JSON.parse(decodeURIComponent(state));
+
+    // Verificar que el estado sea válido (no mayor a 1 hora)
+    if (!stateData || !stateData.timestamp || Date.now() - stateData.timestamp > 3600000) {
+      const frontendUrl = stateData?.frontend_url || 'http://localhost:5173';
+      return res.redirect(`${frontendUrl}/login?error=invalid_state`);
+    }
+
+    console.log('🔄 Intercambiando código por token de acceso...');
+
+    // Intercambiar el código por un token de acceso (v23.0)
+    const tokenResponse = await axios.get('https://graph.facebook.com/v23.0/oauth/access_token', {
+      params: {
+        client_id: process.env.FACEBOOK_APP_ID,
+        redirect_uri: 'https://sharkboot-backend-production.up.railway.app/auth/facebook/callback',
+        client_secret: process.env.FACEBOOK_APP_SECRET,
+        code
+      }
+    });
+
+    const { access_token } = tokenResponse.data;
+    console.log('✅ Token de acceso obtenido');
+
+    // Obtener información del perfil con permisos extendidos (v23.0)
+    const profileResponse = await axios.get('https://graph.facebook.com/v23.0/me', {
+      params: {
+        fields: 'id,name,email,accounts{id,name,access_token},businesses{id,name}',
+        access_token
+      }
+    });
+
+    const facebookProfile = profileResponse.data;
+    console.log('✅ Perfil obtenido con datos extendidos');
+
+    const { id: facebook_id, name, email } = facebookProfile;
+    
+    // ✅ DETECTAR SI ES VINCULACIÓN (usuario ya logueado) O REGISTRO NUEVO
+    const isLinking = stateData.linkToUserId ? true : false;
+    
+    if (isLinking) {
+      // 🔗 ESCENARIO 1: VINCULAR FACEBOOK A CUENTA EXISTENTE
+      console.log('🔗 Vinculando Facebook a cuenta existente:', stateData.linkToUserId);
       
-      // Manejar errores de Facebook
-      if (error) {
-        console.error('❌ Error de Facebook:', error, error_description);
-        const stateData = state ? JSON.parse(decodeURIComponent(state)) : {};
-        const frontendUrl = stateData?.frontend_url || 'http://localhost:5173';
-        return res.redirect(`${frontendUrl}/login?error=${error}&error_description=${encodeURIComponent(error_description || 'Error desconocido')}`);
-      }
-  
-      const stateData = JSON.parse(decodeURIComponent(state));
-  
-      // Verificar que el estado sea válido (no mayor a 1 hora)
-      if (!stateData || !stateData.timestamp || Date.now() - stateData.timestamp > 3600000) {
-        const frontendUrl = stateData?.frontend_url || 'http://localhost:5173';
-        return res.redirect(`${frontendUrl}/login?error=invalid_state`);
-      }
-  
-      console.log('🔄 Intercambiando código por token de acceso...');
-  
-      // ✅ Intercambiar el código por un token de acceso (v23.0)
-      const tokenResponse = await axios.get('https://graph.facebook.com/v23.0/oauth/access_token', {
-        params: {
-          client_id: process.env.FACEBOOK_APP_ID,
-          redirect_uri: 'https://sharkboot-backend-production.up.railway.app/auth/facebook/callback',
-          client_secret: process.env.FACEBOOK_APP_SECRET,
-          code
+      try {
+        // Verificar que el usuario existe
+        const [[existingUser]] = await db.execute(
+          'SELECT id, client_id, name FROM users WHERE id = ?',
+          [stateData.linkToUserId]
+        );
+        
+        if (!existingUser) {
+          throw new Error('Usuario no encontrado');
         }
-      });
-  
-      const { access_token } = tokenResponse.data;
-      console.log('✅ Token de acceso obtenido');
-  
-      // ✅ Obtener información del perfil con permisos extendidos (v23.0)
-      const profileResponse = await axios.get('https://graph.facebook.com/v23.0/me', {
-        params: {
-          fields: 'id,name,email,accounts{id,name,access_token},businesses{id,name}',
-          access_token
+        
+        // Verificar si ya tiene Facebook vinculado
+        const [[existingProvider]] = await db.execute(
+          'SELECT id FROM user_providers WHERE user_id = ? AND provider = "FACEBOOK"',
+          [stateData.linkToUserId]
+        );
+        
+        if (existingProvider) {
+          // Actualizar token existente
+          await db.execute(
+            'UPDATE user_providers SET provider_id = ?, access_token = ? WHERE user_id = ? AND provider = "FACEBOOK"',
+            [facebook_id, access_token, stateData.linkToUserId]
+          );
+          console.log('✅ Facebook actualizado para usuario existente');
+        } else {
+          // Crear nueva vinculación
+          const newProviderId = uuidv4();
+          await db.execute(
+            'INSERT INTO user_providers (id, user_id, provider, provider_id, access_token) VALUES (?, ?, "FACEBOOK", ?, ?)',
+            [newProviderId, stateData.linkToUserId, facebook_id, access_token]
+          );
+          console.log('✅ Facebook vinculado a usuario existente');
         }
-      });
-  
-      const facebookProfile = profileResponse.data;
-      console.log('✅ Perfil obtenido con datos extendidos');
-  
-      // Guardar o actualizar usuario en la base de datos usando la estructura existente
-      const { id: facebook_id, name, email } = facebookProfile;
-  
+        
+        // Generar JWT para el usuario existente
+        const token = sign({ 
+          userId: existingUser.id, 
+          clientId: existingUser.client_id, 
+          name: existingUser.name 
+        });
+        
+        const frontendUrl = stateData.frontend_url || 'http://localhost:5173';
+        const redirectUrl = new URL(frontendUrl + '/dashboard'); // Redirigir al dashboard, no al login
+        redirectUrl.searchParams.set('linked', 'facebook');
+        redirectUrl.searchParams.set('auth_token', token);
+        
+        console.log('🔄 Facebook vinculado, redirigiendo al dashboard');
+        return res.redirect(redirectUrl.toString());
+        
+      } catch (linkError) {
+        console.error('❌ Error vinculando Facebook:', linkError.message);
+        const frontendUrl = stateData.frontend_url || 'http://localhost:5173';
+        return res.redirect(`${frontendUrl}/dashboard?error=link_failed`);
+      }
+      
+    } else {
+      // 🆕 ESCENARIO 2: REGISTRO NUEVO CON FACEBOOK
+      console.log('🆕 Registro nuevo con Facebook');
+      
       try {
         // Verificar si ya existe un usuario con este Facebook ID
         const [[existingUser]] = await db.execute(
@@ -246,103 +456,122 @@ const ALLOWED_REDIRECTS = [
             WHERE up.provider='FACEBOOK' AND up.provider_id=?`,
           [facebook_id]
         );
-  
+
         if (existingUser) {
-          // Usuario existente - actualizar token
-          console.log('👤 Usuario existente encontrado, actualizando token');
+          // Usuario existente - actualizar token y hacer login
+          console.log('👤 Usuario Facebook existente encontrado, actualizando token');
           await db.execute(
-            `UPDATE user_providers SET access_token = ? WHERE user_id = ? AND provider = 'FACEBOOK'`,
+            'UPDATE user_providers SET access_token = ? WHERE user_id = ? AND provider = "FACEBOOK"',
             [access_token, existingUser.user_id]
           );
+          
+          // Generar JWT y redirigir
+          const token = sign({ 
+            userId: existingUser.user_id, 
+            clientId: existingUser.client_id, 
+            name: existingUser.name 
+          });
+          
+          const frontendUrl = stateData.frontend_url || 'http://localhost:5173';
+          const redirectUrl = new URL(frontendUrl + '/login');
+          redirectUrl.searchParams.set('auth_token', token);
+          redirectUrl.searchParams.set('fb_token', access_token);
+          
+          console.log('🔄 Login exitoso con Facebook existente');
+          return res.redirect(redirectUrl.toString());
+          
         } else {
-          // Nuevo usuario - registro automático
-          console.log('🆕 Creando nuevo usuario');
+          // ✅ NUEVO USUARIO - CREAR TODO DESDE CERO
+          console.log('🆕 Creando nuevo usuario completo desde Facebook');
           
           const newClientId = uuidv4();
           const newUserId = uuidv4();
           const newProviderId = uuidv4();
-  
-          // Crear client
+          
+          // ✅ 1. Crear CLIENT (evitar undefined)
           await db.execute(
-            'INSERT INTO clients (id, name) VALUES (?, ?)',
-            [newClientId, `Cliente de ${name}`]
+            'INSERT INTO clients (id, name, plan, created_at) VALUES (?, ?, ?, NOW())',
+            [
+              newClientId, 
+              `Cliente de ${name || 'Usuario Facebook'}`, // Asegurar que no sea undefined
+              'FREE'
+            ]
           );
-  
-          // Crear user
+          console.log('✅ Cliente creado:', newClientId);
+
+          // ✅ 2. Crear USER (solo campos obligatorios, evitar undefined)
           await db.execute(
-            `INSERT INTO users (id, client_id, name, email) VALUES (?, ?, ?, ?)`,
-            [newUserId, newClientId, name, email]
+            'INSERT INTO users (id, client_id, name, email, created_at) VALUES (?, ?, ?, ?, NOW())',
+            [
+              newUserId, 
+              newClientId, 
+              name || 'Usuario Facebook', // Asegurar que no sea undefined
+              email || null // Si no hay email, explícitamente null
+            ]
           );
-  
-          // Crear provider
+          console.log('✅ Usuario creado:', newUserId);
+
+          // ✅ 3. Crear USER_PROVIDER (evitar undefined)
           await db.execute(
-            `INSERT INTO user_providers (id, user_id, provider, provider_id, access_token)
-             VALUES (?, ?, 'FACEBOOK', ?, ?)`,
-            [newProviderId, newUserId, facebook_id, access_token]
+            'INSERT INTO user_providers (id, user_id, provider, provider_id, access_token, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
+            [
+              newProviderId, 
+              newUserId, 
+              'FACEBOOK', 
+              facebook_id, 
+              access_token || null // Asegurar que no sea undefined
+            ]
           );
-  
-          console.log('✅ Usuario guardado en DB:', facebook_id);
+          console.log('✅ Provider creado:', newProviderId);
+
+          // Generar JWT
+          const token = sign({ 
+            userId: newUserId, 
+            clientId: newClientId, 
+            name: name || 'Usuario Facebook'
+          });
+
+          // Redirigir al frontend indicando que es un nuevo usuario
+          const frontendUrl = stateData.frontend_url || 'http://localhost:5173';
+          const redirectUrl = new URL(frontendUrl + '/login');
+          redirectUrl.searchParams.set('auth_token', token);
+          redirectUrl.searchParams.set('fb_token', access_token);
+          redirectUrl.searchParams.set('fb_id', facebook_id);
+          redirectUrl.searchParams.set('name', name || '');
+          redirectUrl.searchParams.set('email', email || '');
+          redirectUrl.searchParams.set('new_user', 'true'); // Indicar que es usuario nuevo
+          
+          console.log('🔄 Usuario nuevo creado, redirigiendo al frontend');
+          return res.redirect(redirectUrl.toString());
         }
-      } catch (dbError) {
-        console.error('❌ Error guardando usuario en DB:', dbError.message);
-      }
-  
-      // Usar la URL del frontend del estado
-      const frontendUrl = stateData.frontend_url || 'http://localhost:5173';
-  
-      // Obtener userId y clientId para generar JWT
-      let userId, clientId, userName;
-      try {
-        const [[userData]] = await db.execute(
-          `SELECT up.user_id, u.client_id, u.name
-             FROM user_providers up
-             JOIN users u ON u.id = up.user_id
-            WHERE up.provider='FACEBOOK' AND up.provider_id=?`,
-          [facebook_id]
-        );
         
-        if (userData) {
-          userId = userData.user_id;
-          clientId = userData.client_id;
-          userName = userData.name;
-        }
-      } catch (e) {
-        console.error('❌ Error obteniendo datos de usuario:', e.message);
+      } catch (dbError) {
+        console.error('❌ Error en base de datos:', dbError.message);
+        console.error('Stack:', dbError.stack);
+        
+        const frontendUrl = stateData.frontend_url || 'http://localhost:5173';
+        return res.redirect(`${frontendUrl}/login?error=database_error&error_description=${encodeURIComponent('Error creando usuario')}`);
       }
-  
-      // Generar JWT si tenemos los datos
-      const token = userId && clientId ? sign({ userId, clientId, name: userName || name }) : null;
-  
-      // Redirigir al frontend con los datos completos
-      const redirectUrl = new URL(frontendUrl + '/login');
-      redirectUrl.searchParams.set('fb_token', access_token);
-      redirectUrl.searchParams.set('fb_id', facebookProfile.id);
-      redirectUrl.searchParams.set('name', facebookProfile.name);
-      redirectUrl.searchParams.set('email', facebookProfile.email || '');
-      if (token) {
-        redirectUrl.searchParams.set('auth_token', token);
-      }
-  
-      console.log('🔄 Redirigiendo al frontend:', redirectUrl.toString());
-      return res.redirect(redirectUrl.toString());
-      
-    } catch (error) {
-      console.error('❌ Error en callback de Facebook:', error.response?.data || error.message);
-      
-      // Intentar obtener frontend URL del state para redirección de error
-      let frontendUrl = 'http://localhost:5173';
-      try {
-        if (req.query.state) {
-          const stateData = JSON.parse(decodeURIComponent(req.query.state));
-          frontendUrl = stateData.frontend_url || frontendUrl;
-        }
-      } catch (e) {
-        // Usar URL por defecto si hay error parseando state
-      }
-      
-      return res.redirect(`${frontendUrl}/login?error=callback_error&error_description=${encodeURIComponent('Error procesando autenticación')}`);
     }
-  });
+    
+  } catch (error) {
+    console.error('❌ Error en callback de Facebook:', error.response?.data || error.message);
+    console.error('Stack:', error.stack);
+    
+    // Intentar obtener frontend URL del state para redirección de error
+    let frontendUrl = 'http://localhost:5173';
+    try {
+      if (req.query.state) {
+        const stateData = JSON.parse(decodeURIComponent(req.query.state));
+        frontendUrl = stateData.frontend_url || frontendUrl;
+      }
+    } catch (e) {
+      // Usar URL por defecto si hay error parseando state
+    }
+    
+    return res.redirect(`${frontendUrl}/login?error=callback_error&error_description=${encodeURIComponent('Error procesando autenticación')}`);
+  }
+});
 
 /*---------------------------------------------------------------
   5) LOGIN con FACEBOOK usando Passport (mantener para compatibilidad)
@@ -518,7 +747,7 @@ router.get('/facebook/permissions', async (req, res) => {
   9) INICIAR proceso de vínculo Facebook desde el frontend
      (requiere JWT en Authorization)
   -------------------------------------------------------------*/
-const authGuard = require('../middlewares/authGuard');
+
 
 router.get(
   '/link/facebook',
