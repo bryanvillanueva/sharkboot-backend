@@ -188,19 +188,57 @@ const ALLOWED_REDIRECTS = [
   ENDPOINT PARA VINCULAR FACEBOOK - Para usuarios ya logueados
   -------------------------------------------------------------*/
 
-router.get('/facebook/link', authGuard, (req, res) => {
-  console.log('🔗 Iniciando vinculación de Facebook para usuario logueado');
+/*---------------------------------------------------------------
+  SOLUCIÓN: Agregar ruta alternativa que NO requiera JWT en el header
+  -------------------------------------------------------------*/
+
+// Opción 1: Modificar la ruta existente para aceptar token como query parameter
+router.get('/facebook/link', async (req, res) => {
+  console.log('🔗 Iniciando vinculación de Facebook');
   
   if (!process.env.FACEBOOK_APP_ID) {
     console.error('❌ FACEBOOK_APP_ID no está configurado');
     return res.redirect('/dashboard?error=facebook_not_configured');
   }
 
-  // Obtener datos del usuario autenticado del middleware
-  const { userId } = req.auth; // Viene del authGuard
-  const frontendUrl = req.query.frontend_url || req.get('Referer') || 'http://localhost:5173';
+  // ✅ OBTENER TOKEN DE MÚLTIPLES FUENTES
+  let token = null;
+  let userId = null;
+
+  // 1. Intentar desde header Authorization (método original)
+  const authHeader = req.get('Authorization');
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.substring(7);
+  }
   
-  console.log('👤 Usuario logueado solicitando vinculación:', userId);
+  // 2. Intentar desde query parameter (método nuevo para window.location.href)
+  if (!token && req.query.token) {
+    token = req.query.token;
+  }
+
+  // Verificar y decodificar el token
+  if (!token) {
+    const frontendUrl = req.query.frontend_url || 'http://localhost:5173';
+    return res.redirect(`${frontendUrl}/accounts?error=no_token`);
+  }
+
+  try {
+    // Verificar el token JWT
+    const decoded = verify(token); // Tu función de verificación JWT
+    userId = decoded.userId;
+    
+    if (!userId) {
+      throw new Error('Token inválido');
+    }
+    
+    console.log('👤 Usuario logueado solicitando vinculación:', userId);
+  } catch (error) {
+    console.error('❌ Token inválido:', error.message);
+    const frontendUrl = req.query.frontend_url || 'http://localhost:5173';
+    return res.redirect(`${frontendUrl}/accounts?error=invalid_token`);
+  }
+
+  const frontendUrl = req.query.frontend_url || req.get('Referer') || 'http://localhost:5173';
 
   // Construir estado con información de vinculación
   const state = encodeURIComponent(JSON.stringify({
