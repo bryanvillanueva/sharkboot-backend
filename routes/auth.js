@@ -2,6 +2,7 @@ const express   = require('express');
 const passport  = require('passport');
 const bcrypt    = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
+const axios     = require('axios');
 const db        = require('../db');
 const { sign, verify } = require('../helpers/jwt');
 
@@ -102,79 +103,90 @@ const ALLOWED_REDIRECTS = [
 ];
 
 /*---------------------------------------------------------------
-  3) FACEBOOK AUTH START - Nuevo endpoint siguiendo el patrón de referencia
+  3) FACEBOOK AUTH START - Endpoint con TODOS los permisos aprobados
   -------------------------------------------------------------*/
 router.get('/facebook/start', (req, res) => {
   console.log('🚀 Iniciando proceso de autenticación con Facebook...');
   
   if (!process.env.FACEBOOK_APP_ID) {
     console.error('❌ FACEBOOK_APP_ID no está configurado');
-    return res.redirect('https://boot.sharkagency.co/login?error=facebook_not_configured');
+    return res.redirect('http://localhost:5173/login?error=facebook_not_configured');
   }
 
   // Obtener la URL del frontend desde el query parameter
-  const frontendUrl = req.query.frontend_url || 'https://boot.sharkagency.co';
+  const frontendUrl = req.query.frontend_url || 'http://localhost:5173';
   console.log('📍 Frontend URL recibida:', frontendUrl);
 
   // Construir estado con información del frontend
-  const state = Buffer.from(JSON.stringify({
+  const state = encodeURIComponent(JSON.stringify({
     timestamp: Date.now(),
-    source: 'sharkboot_login',
+    source: 'crm_login',
     frontend_url: frontendUrl
-  })).toString('base64');
+  }));
 
-  // Permisos requeridos de Facebook
+  // ✅ TODOS LOS PERMISOS APROBADOS QUE SOLICITAS
   const scopes = [
+    'instagram_manage_events',
+    'page_events',
+    'ads_management',
+    'ads_read',
+    'business_management',
+    'catalog_management',
+    'whatsapp_business_messaging',
+    'whatsapp_business_management',
+    'pages_show_list',
+    'pages_read_user_content',
+    'pages_messaging',
+    'pages_manage_posts',
+    'leads_retrieval',
     'email',
     'public_profile'
   ].join(',');
 
   const redirectUri = 'https://sharkboot-backend-production.up.railway.app/auth/facebook/callback';
 
-  // Construir URL de autorización de Facebook
-  const facebookAuthUrl = 'https://www.facebook.com/v23.0/dialog/oauth' +
+  // Usar versión actualizada de la API
+  const facebookAuthUrl = 'https://www.facebook.com/v18.0/dialog/oauth' +
     `?client_id=${process.env.FACEBOOK_APP_ID}` +
     `&redirect_uri=${encodeURIComponent(redirectUri)}` +
     `&scope=${scopes}` +
     `&state=${state}` +
     `&response_type=code`;
 
-  console.log('✅ Redirigiendo a Facebook para autorización...');
+  console.log('✅ Solicitando permisos completos aprobados...');
+  console.log('🔍 Permisos:', scopes);
+  console.log('🔍 Facebook Auth URL:', facebookAuthUrl);
   
-  // Redirigir directamente a Facebook
   res.redirect(facebookAuthUrl);
 });
 
 /*---------------------------------------------------------------
-   4) CALLBACK Facebook - Nuevo endpoint manual
+   4) CALLBACK Facebook - Callback que maneja la respuesta de Facebook
   -------------------------------------------------------------*/
 router.get('/facebook/callback', async (req, res) => {
   try {
-    const { code, state } = req.query;
+    const { code, state, error, error_description } = req.query;
     
-    if (!code) {
-      console.error('❌ No se recibió código de autorización');
-      return res.redirect('https://boot.sharkagency.co/login?error=no_code');
+    // Manejar errores de Facebook
+    if (error) {
+      console.error('❌ Error de Facebook:', error, error_description);
+      const stateData = state ? JSON.parse(decodeURIComponent(state)) : {};
+      const frontendUrl = stateData?.frontend_url || 'http://localhost:5173';
+      return res.redirect(`${frontendUrl}/login?error=${error}&error_description=${encodeURIComponent(error_description || 'Error desconocido')}`);
     }
 
-    // Decodificar y verificar estado
-    let stateData;
-    try {
-      stateData = JSON.parse(Buffer.from(state, 'base64').toString('utf8'));
-    } catch (e) {
-      console.error('❌ Error decodificando state:', e);
-      return res.redirect('https://boot.sharkagency.co/login?error=invalid_state');
-    }
+    const stateData = JSON.parse(decodeURIComponent(state));
 
     // Verificar que el estado sea válido (no mayor a 1 hora)
     if (!stateData || !stateData.timestamp || Date.now() - stateData.timestamp > 3600000) {
-      const frontendUrl = stateData?.frontend_url || 'https://boot.sharkagency.co';
-      return res.redirect(`${frontendUrl}/login?error=expired_state`);
+      const frontendUrl = stateData?.frontend_url || 'http://localhost:5173';
+      return res.redirect(`${frontendUrl}/login?error=invalid_state`);
     }
 
+    console.log('🔄 Intercambiando código por token de acceso...');
+
     // Intercambiar el código por un token de acceso
-    const axios = require('axios');
-    const tokenResponse = await axios.get('https://graph.facebook.com/v23.0/oauth/access_token', {
+    const tokenResponse = await axios.get('https://graph.facebook.com/v18.0/oauth/access_token', {
       params: {
         client_id: process.env.FACEBOOK_APP_ID,
         redirect_uri: 'https://sharkboot-backend-production.up.railway.app/auth/facebook/callback',
@@ -184,89 +196,128 @@ router.get('/facebook/callback', async (req, res) => {
     });
 
     const { access_token } = tokenResponse.data;
+    console.log('✅ Token de acceso obtenido');
 
-    // Obtener información del perfil
-    const profileResponse = await axios.get('https://graph.facebook.com/me', {
+    // Obtener información del perfil con permisos extendidos
+    const profileResponse = await axios.get('https://graph.facebook.com/v18.0/me', {
       params: {
-        fields: 'id,name,email',
+        fields: 'id,name,email,accounts{id,name,access_token},businesses{id,name}',
         access_token
       }
     });
 
     const facebookProfile = profileResponse.data;
-    const { id: facebookId, name, email } = facebookProfile;
+    console.log('✅ Perfil obtenido con datos extendidos');
 
-    console.log('📱 Perfil de Facebook obtenido:', { facebookId, name, email });
+    // Guardar o actualizar usuario en la base de datos
+    const { id: facebook_id, name, email } = facebookProfile;
+    const company_id = null;
 
-    let userId, clientId, userName;
-
-    // Verificar si ya existe un usuario con este Facebook ID
-    const [[existingUser]] = await db.execute(
-      `SELECT up.user_id, u.client_id, u.name
-         FROM user_providers up
-         JOIN users u ON u.id = up.user_id
-        WHERE up.provider='FACEBOOK' AND up.provider_id=?`,
-      [facebookId]
-    );
-
-    if (existingUser) {
-      // Usuario existente - login
-      console.log('👤 Usuario existente encontrado');
-      userId = existingUser.user_id;
-      clientId = existingUser.client_id;
-      userName = existingUser.name;
-    } else {
-      // Nuevo usuario - registro automático
-      console.log('🆕 Creando nuevo usuario');
-      
-      const newClientId = uuidv4();
-      const newUserId = uuidv4();
-      const newProviderId = uuidv4();
-
-      // Crear client
-      await db.execute(
-        'INSERT INTO clients (id, name) VALUES (?, ?)',
-        [newClientId, `Cliente de ${name}`]
+    // Guardar en base de datos usando la estructura existente
+    try {
+      // Verificar si ya existe un usuario con este Facebook ID
+      const [[existingUser]] = await db.execute(
+        `SELECT up.user_id, u.client_id, u.name
+           FROM user_providers up
+           JOIN users u ON u.id = up.user_id
+          WHERE up.provider='FACEBOOK' AND up.provider_id=?`,
+        [facebook_id]
       );
 
-      // Crear user
-      await db.execute(
-        `INSERT INTO users (id, client_id, name, email) VALUES (?, ?, ?, ?)`,
-        [newUserId, newClientId, name, email]
-      );
+      if (existingUser) {
+        // Usuario existente - actualizar token
+        console.log('👤 Usuario existente encontrado, actualizando token');
+        await db.execute(
+          `UPDATE user_providers SET access_token = ? WHERE user_id = ? AND provider = 'FACEBOOK'`,
+          [access_token, existingUser.user_id]
+        );
+      } else {
+        // Nuevo usuario - registro automático
+        console.log('🆕 Creando nuevo usuario');
+        
+        const newClientId = uuidv4();
+        const newUserId = uuidv4();
+        const newProviderId = uuidv4();
 
-      // Crear provider
-      await db.execute(
-        `INSERT INTO user_providers (id, user_id, provider, provider_id, access_token)
-         VALUES (?, ?, 'FACEBOOK', ?, ?)`,
-        [newProviderId, newUserId, facebookId, access_token]
-      );
+        // Crear client
+        await db.execute(
+          'INSERT INTO clients (id, name) VALUES (?, ?)',
+          [newClientId, `Cliente de ${name}`]
+        );
 
-      userId = newUserId;
-      clientId = newClientId;
-      userName = name;
+        // Crear user
+        await db.execute(
+          `INSERT INTO users (id, client_id, name, email) VALUES (?, ?, ?, ?)`,
+          [newUserId, newClientId, name, email]
+        );
+
+        // Crear provider
+        await db.execute(
+          `INSERT INTO user_providers (id, user_id, provider, provider_id, access_token)
+           VALUES (?, ?, 'FACEBOOK', ?, ?)`,
+          [newProviderId, newUserId, facebook_id, access_token]
+        );
+
+        console.log('✅ Usuario guardado en DB:', facebook_id);
+      }
+    } catch (dbError) {
+      console.error('❌ Error guardando usuario en DB:', dbError.message);
     }
 
-    // Generar JWT
-    const token = sign({ userId, clientId, name: userName });
-
     // Usar la URL del frontend del estado
-    const frontendUrl = stateData.frontend_url || 'https://boot.sharkagency.co';
+    const frontendUrl = stateData.frontend_url || 'http://localhost:5173';
 
-    // Construir URL de redirección con datos
+    // Obtener userId y clientId para generar JWT
+    let userId, clientId, userName;
+    try {
+      const [[userData]] = await db.execute(
+        `SELECT up.user_id, u.client_id, u.name
+           FROM user_providers up
+           JOIN users u ON u.id = up.user_id
+          WHERE up.provider='FACEBOOK' AND up.provider_id=?`,
+        [facebook_id]
+      );
+      
+      if (userData) {
+        userId = userData.user_id;
+        clientId = userData.client_id;
+        userName = userData.name;
+      }
+    } catch (e) {
+      console.error('❌ Error obteniendo datos de usuario:', e.message);
+    }
+
+    // Generar JWT si tenemos los datos
+    const token = userId && clientId ? sign({ userId, clientId, name: userName || name }) : null;
+
+    // Redirigir al frontend con los datos completos
     const redirectUrl = new URL(frontendUrl + '/login');
     redirectUrl.searchParams.set('fb_token', access_token);
-    redirectUrl.searchParams.set('fb_id', facebookId);
-    redirectUrl.searchParams.set('name', userName);
-    redirectUrl.searchParams.set('email', email || '');
-    redirectUrl.searchParams.set('auth_token', token);
+    redirectUrl.searchParams.set('fb_id', facebookProfile.id);
+    redirectUrl.searchParams.set('name', facebookProfile.name);
+    redirectUrl.searchParams.set('email', facebookProfile.email || '');
+    if (token) {
+      redirectUrl.searchParams.set('auth_token', token);
+    }
 
-    console.log('🔄 Redirigiendo a:', redirectUrl.toString());
+    console.log('🔄 Redirigiendo al frontend:', redirectUrl.toString());
     return res.redirect(redirectUrl.toString());
-
+    
   } catch (error) {
     console.error('❌ Error en callback de Facebook:', error.response?.data || error.message);
-    return res.redirect('https://boot.sharkagency.co/login?error=facebook_auth_failed');
+    
+    // Intentar obtener frontend URL del state para redirección de error
+    let frontendUrl = 'http://localhost:5173';
+    try {
+      if (req.query.state) {
+        const stateData = JSON.parse(decodeURIComponent(req.query.state));
+        frontendUrl = stateData.frontend_url || frontendUrl;
+      }
+    } catch (e) {
+      // Usar URL por defecto si hay error parseando state
+    }
+    
+    return res.redirect(`${frontendUrl}/login?error=callback_error&error_description=${encodeURIComponent('Error procesando autenticación')}`);
   }
 });
 
@@ -387,9 +438,8 @@ router.get('/facebook/verify', async (req, res) => {
   }
 
   try {
-    const axios = require('axios');
     // Verificar que el token siga siendo válido
-    const verifyRes = await axios.get('https://graph.facebook.com/v23.0/me', {
+    const verifyRes = await axios.get('https://graph.facebook.com/v18.0/me', {
       params: {
         access_token: fb_token,
         fields: 'id,name,email'
@@ -410,7 +460,39 @@ router.get('/facebook/verify', async (req, res) => {
 });
 
 /*---------------------------------------------------------------
-  8) INICIAR proceso de vínculo Facebook desde el frontend
+  8) ENDPOINT ADICIONAL para verificar permisos obtenidos
+  -------------------------------------------------------------*/
+router.get('/facebook/permissions', async (req, res) => {
+  const { access_token } = req.query;
+  
+  if (!access_token) {
+    return res.status(400).json({ error: 'access_token requerido' });
+  }
+
+  try {
+    // Verificar qué permisos fueron realmente otorgados
+    const permissionsResponse = await axios.get('https://graph.facebook.com/v18.0/me/permissions', {
+      params: { access_token }
+    });
+    
+    const grantedPermissions = permissionsResponse.data.data
+      .filter(perm => perm.status === 'granted')
+      .map(perm => perm.permission);
+    
+    console.log('✅ Permisos otorgados:', grantedPermissions);
+    
+    res.json({ 
+      granted_permissions: grantedPermissions,
+      total_granted: grantedPermissions.length
+    });
+  } catch (error) {
+    console.error('❌ Error verificando permisos:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Error verificando permisos' });
+  }
+});
+
+/*---------------------------------------------------------------
+  9) INICIAR proceso de vínculo Facebook desde el frontend
      (requiere JWT en Authorization)
   -------------------------------------------------------------*/
 const authGuard = require('../middlewares/authGuard');
