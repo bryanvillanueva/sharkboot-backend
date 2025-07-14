@@ -409,7 +409,7 @@ router.get('/facebook/callback', async (req, res) => {
     // Obtener información del perfil con permisos extendidos (v23.0)
     const profileResponse = await axios.get('https://graph.facebook.com/v23.0/me', {
       params: {
-        fields: 'id,name,email,accounts{id,name,access_token},businesses{id,name}',
+        fields: 'id,name,email,accounts{id,name,access_token_enc},businesses{id,name}',
         access_token
       }
     });
@@ -446,7 +446,7 @@ router.get('/facebook/callback', async (req, res) => {
         if (existingProvider) {
           // Actualizar token existente
           await db.execute(
-            'UPDATE user_providers SET provider_id = ?, access_token = ? WHERE user_id = ? AND provider = "FACEBOOK"',
+            'UPDATE user_providers SET provider_id = ?, access_token_enc = ? WHERE user_id = ? AND provider = "FACEBOOK"',
             [facebook_id, access_token, stateData.linkToUserId]
           );
           console.log('✅ Facebook actualizado para usuario existente');
@@ -454,7 +454,7 @@ router.get('/facebook/callback', async (req, res) => {
           // Crear nueva vinculación
           const newProviderId = uuidv4();
           await db.execute(
-            'INSERT INTO user_providers (id, user_id, provider, provider_id, access_token) VALUES (?, ?, "FACEBOOK", ?, ?)',
+            'INSERT INTO user_providers (id, user_id, provider, provider_id, access_token_enc) VALUES (?, ?, "FACEBOOK", ?, ?)',
             [newProviderId, stateData.linkToUserId, facebook_id, access_token]
           );
           console.log('✅ Facebook vinculado a usuario existente');
@@ -499,7 +499,7 @@ router.get('/facebook/callback', async (req, res) => {
           // Usuario existente - actualizar token y hacer login
           console.log('👤 Usuario Facebook existente encontrado, actualizando token');
           await db.execute(
-            'UPDATE user_providers SET access_token = ? WHERE user_id = ? AND provider = "FACEBOOK"',
+            'UPDATE user_providers SET access_token_enc = ? WHERE user_id = ? AND provider = "FACEBOOK"',
             [access_token, existingUser.user_id]
           );
           
@@ -551,7 +551,7 @@ router.get('/facebook/callback', async (req, res) => {
 
           // ✅ 3. Crear USER_PROVIDER (evitar undefined)
           await db.execute(
-            'INSERT INTO user_providers (id, user_id, provider, provider_id, access_token, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
+            'INSERT INTO user_providers (id, user_id, provider, provider_id, access_token_enc, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
             [
               newProviderId, 
               newUserId, 
@@ -645,7 +645,7 @@ router.get(
       userId = linkToUserId;
 
       await db.execute(
-        `INSERT IGNORE INTO user_providers (id,user_id,provider,provider_id,access_token)
+        `INSERT IGNORE INTO user_providers (id,user_id,provider,provider_id,access_token_enc)
          VALUES (UUID(),?,'FACEBOOK',?,?)`,
         [userId, facebookId, accessToken]
       );
@@ -685,7 +685,7 @@ router.get(
         );
 
         await db.execute(
-          `INSERT INTO user_providers (id,user_id,provider,provider_id,access_token)
+          `INSERT INTO user_providers (id,user_id,provider,provider_id,access_token_enc)
            VALUES (?,?,'FACEBOOK',?,?)`,
           [newProviderId, newUserId, facebookId, accessToken]
         );
