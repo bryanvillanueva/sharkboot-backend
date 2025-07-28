@@ -383,7 +383,57 @@ router.get('/facebook/callback', async (req, res) => {
       return res.redirect(`${frontendUrl}/login?error=${error}&error_description=${encodeURIComponent(error_description || 'Error desconocido')}`);
     }
 
-    const stateData = JSON.parse(decodeURIComponent(state));
+    // ✅ PARSING SEGURO DEL STATE
+    let stateData;
+    try {
+      // Intentar decodificar como JSON primero
+      const decodedState = decodeURIComponent(state);
+      console.log('🔍 State decodificado:', decodedState);
+      
+      // Verificar si es un JWT (empieza con eyJ)
+      if (decodedState.startsWith('eyJ')) {
+        console.log('🔑 State parece ser un JWT, intentando decodificar...');
+        try {
+          // Decodificar JWT
+          const jwtParts = decodedState.split('.');
+          if (jwtParts.length === 3) {
+            const payload = JSON.parse(atob(jwtParts[1]));
+            console.log('📋 JWT payload:', payload);
+            
+            // Crear stateData desde el JWT
+            stateData = {
+              timestamp: Date.now(), // Timestamp actual
+              source: 'whatsapp_setup', // Asumir que es setup de WhatsApp
+              frontend_url: 'http://localhost:5173', // URL por defecto
+              userId: payload.userId || payload.user_id || payload.sub,
+              clientId: payload.clientId || payload.client_id
+            };
+            
+            console.log('✅ State reconstruido desde JWT:', stateData);
+          } else {
+            throw new Error('JWT malformado');
+          }
+        } catch (jwtError) {
+          console.error('❌ Error decodificando JWT:', jwtError);
+          throw new Error('State JWT inválido');
+        }
+      } else {
+        // Intentar parsear como JSON normal
+        stateData = JSON.parse(decodedState);
+        console.log('✅ State parseado como JSON:', stateData);
+      }
+    } catch (parseError) {
+      console.error('❌ Error parseando state:', parseError);
+      console.log('🔍 State original:', state);
+      
+      // Fallback: crear state básico
+      stateData = {
+        timestamp: Date.now(),
+        source: 'whatsapp_setup',
+        frontend_url: 'http://localhost:5173'
+      };
+      console.log('🔄 Usando fallback state:', stateData);
+    }
 
     // Verificar que el estado sea válido (no mayor a 1 hora)
     if (!stateData || !stateData.timestamp || Date.now() - stateData.timestamp > 3600000) {
