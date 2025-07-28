@@ -12,6 +12,7 @@ module.exports = function authGuard(req, res, next) {
   }
 
   try {
+    console.log('🔍 [authGuard] token crudo:', JSON.stringify(token));
     const decoded = verify(token);
     
     // Verificar que el token tenga los campos requeridos

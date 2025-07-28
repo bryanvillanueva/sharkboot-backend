@@ -369,7 +369,7 @@ router.delete('/facebook/unlink', authGuard, async (req, res) => {
    CALLBACK Facebook COMPLETO - v23.0 (igual que CRM)
   -------------------------------------------------------------*/
  /*---------------------------------------------------------------
-   CALLBACK Facebook COMPLETO - 2 ESCENARIOS
+   CALLBACK Facebook COMPLETO - CON FALLBACK DE WHATSAPP
   -------------------------------------------------------------*/
 router.get('/facebook/callback', async (req, res) => {
   try {
@@ -419,8 +419,231 @@ router.get('/facebook/callback', async (req, res) => {
 
     const { id: facebook_id, name, email } = facebookProfile;
     
-    // ✅ DETECTAR SI ES VINCULACIÓN (usuario ya logueado) O REGISTRO NUEVO
+    // ✅ DETECTAR TIPO DE FLUJO
     const isLinking = stateData.linkToUserId ? true : false;
+    const isWhatsAppSetup = stateData.source === 'whatsapp_setup';
+
+    // 🔧 MANEJO ESPECIAL: Setup de WhatsApp
+    if (isWhatsAppSetup) {
+      console.log('🔧 Procesando setup de WhatsApp...');
+      
+      try {
+        // Verificar que el usuario existe y obtener su información
+        const [[existingUser]] = await db.execute(
+          'SELECT id, client_id, name FROM users WHERE id = ?',
+          [stateData.userId]
+        );
+        
+        if (!existingUser) {
+          throw new Error('Usuario no encontrado para setup de WhatsApp');
+        }
+        
+        // Actualizar o crear el provider de Facebook si no existe
+        const [[existingProvider]] = await db.execute(
+          'SELECT id FROM user_providers WHERE user_id = ? AND provider = "FACEBOOK"',
+          [stateData.userId]
+        );
+        
+        if (existingProvider) {
+          // Actualizar token existente
+          await db.execute(
+            'UPDATE user_providers SET access_token_enc = ?, updated_at = NOW() WHERE user_id = ? AND provider = "FACEBOOK"',
+            [access_token, stateData.userId]
+          );
+          console.log('✅ Token de Facebook actualizado para setup de WhatsApp');
+        } else {
+          // Crear nueva vinculación de Facebook
+          const newProviderId = uuidv4();
+          await db.execute(
+            'INSERT INTO user_providers (id, user_id, provider, provider_id, access_token_enc, created_at) VALUES (?, ?, "FACEBOOK", ?, ?, NOW())',
+            [newProviderId, stateData.userId, facebook_id, access_token]
+          );
+          console.log('✅ Facebook vinculado para setup de WhatsApp');
+        }
+        
+        // 🎯 INTENTAR EMBEDDED SIGNUP AUTOMÁTICO
+        try {
+          console.log('🚀 Intentando setup automático de WhatsApp...');
+          
+          // Verificar permisos del token
+          const permissionsResponse = await axios.get('https://graph.facebook.com/v23.0/me/permissions', {
+            params: { access_token }
+          });
+          
+          const grantedPermissions = permissionsResponse.data.data
+            .filter(perm => perm.status === 'granted')
+            .map(perm => perm.permission);
+          
+          console.log('📋 Permisos otorgados:', grantedPermissions);
+          
+          const hasWhatsAppPerms = grantedPermissions.includes('whatsapp_business_management') && 
+                                  grantedPermissions.includes('whatsapp_business_messaging');
+          
+          if (!hasWhatsAppPerms) {
+            throw new Error('INSUFFICIENT_PERMISSIONS');
+          }
+          
+          // Obtener negocios disponibles
+          const businessesResponse = await axios.get(`https://graph.facebook.com/v23.0/me/businesses`, {
+            params: { access_token }
+          });
+          
+          const businesses = businessesResponse.data.data || [];
+          console.log(`📊 Encontrados ${businesses.length} negocios`);
+          
+          if (businesses.length === 0) {
+            throw new Error('NO_BUSINESSES_FOUND');
+          }
+          
+          // Buscar WABAs en los negocios
+          let availableWabas = [];
+          let totalPhoneNumbers = 0;
+          
+          for (const business of businesses) {
+            try {
+              const wabaResponse = await axios.get(
+                `https://graph.facebook.com/v23.0/${business.id}/owned_whatsapp_business_accounts`,
+                { params: { access_token } }
+              );
+              
+              for (const waba of wabaResponse.data.data || []) {
+                // Obtener números de teléfono para cada WABA
+                try {
+                  const numbersResponse = await axios.get(
+                    `https://graph.facebook.com/v23.0/${waba.id}/phone_numbers`,
+                    { 
+                      params: { 
+                        access_token,
+                        fields: 'id,display_phone_number,verified_name,code_verification_status'
+                      }
+                    }
+                  );
+                  
+                  const phoneNumbers = numbersResponse.data.data || [];
+                  totalPhoneNumbers += phoneNumbers.length;
+                  
+                  availableWabas.push({
+                    business_id: business.id,
+                    business_name: business.name,
+                    waba_id: waba.id,
+                    waba_name: waba.name,
+                    phone_numbers: phoneNumbers
+                  });
+                } catch (numbersError) {
+                  console.log(`⚠️ Error obteniendo números para WABA ${waba.id}:`, numbersError.message);
+                }
+              }
+            } catch (wabaError) {
+              console.log(`⚠️ No se pudieron obtener WABAs para business ${business.id}:`, wabaError.message);
+            }
+          }
+          
+          console.log(`📱 Encontrados ${availableWabas.length} WABAs con ${totalPhoneNumbers} números totales`);
+          
+          if (availableWabas.length === 0) {
+            throw new Error('NO_WABAS_FOUND');
+          }
+          
+          if (totalPhoneNumbers === 0) {
+            throw new Error('NO_PHONE_NUMBERS_FOUND');
+          }
+          
+          // ✅ ÉXITO: Redirigir al frontend con datos de WABAs disponibles
+          const frontendUrl = stateData.frontend_url || 'http://localhost:5173';
+          const redirectUrl = new URL(frontendUrl + '/whatsapp/setup');
+          redirectUrl.searchParams.set('status', 'success');
+          redirectUrl.searchParams.set('setup_method', 'automatic');
+          redirectUrl.searchParams.set('wabas_count', availableWabas.length);
+          redirectUrl.searchParams.set('phone_numbers_count', totalPhoneNumbers);
+          
+          console.log('✅ Setup automático exitoso, redirigiendo al frontend');
+          return res.redirect(redirectUrl.toString());
+          
+        } catch (autoSetupError) {
+          // 🔄 FALLBACK: Setup manual
+          console.log('⚠️ Setup automático falló, iniciando fallback manual:', autoSetupError.message);
+          
+          const frontendUrl = stateData.frontend_url || 'http://localhost:5173';
+          const redirectUrl = new URL(frontendUrl + '/whatsapp/setup');
+          
+          // Determinar el tipo de fallback según el error
+          let fallbackReason = 'unknown';
+          let fallbackInstructions = [];
+          let manualSetupUrl = 'https://business.facebook.com/wa/manage/';
+          let fallbackTitle = 'Configuración manual requerida';
+          
+          if (autoSetupError.message === 'INSUFFICIENT_PERMISSIONS') {
+            fallbackReason = 'insufficient_permissions';
+            fallbackTitle = 'Permisos insuficientes';
+            fallbackInstructions = [
+              '1. Ve a Meta Business Manager',
+              '2. Asegúrate de tener rol de Administrador',
+              '3. Verifica que tu negocio esté aprobado',
+              '4. Intenta el proceso nuevamente'
+            ];
+            manualSetupUrl = 'https://business.facebook.com/settings/';
+          } else if (autoSetupError.message === 'NO_BUSINESSES_FOUND') {
+            fallbackReason = 'no_business_manager';
+            fallbackTitle = 'Business Manager requerido';
+            fallbackInstructions = [
+              '1. Ve a Meta Business Manager',
+              '2. Crea una cuenta de negocio si no tienes una',
+              '3. Verifica tu negocio proporcionando documentos oficiales',
+              '4. Asegúrate de tener rol de Administrador',
+              '5. Regresa aquí para continuar'
+            ];
+            manualSetupUrl = 'https://business.facebook.com/overview';
+          } else if (autoSetupError.message === 'NO_WABAS_FOUND') {
+            fallbackReason = 'no_whatsapp_account';
+            fallbackTitle = 'WhatsApp Business Account requerido';
+            fallbackInstructions = [
+              '1. Ve a WhatsApp Manager',
+              '2. Crea una cuenta de WhatsApp Business',
+              '3. Completa la verificación del negocio',
+              '4. Regresa aquí para sincronizar'
+            ];
+            manualSetupUrl = 'https://business.facebook.com/wa/manage/';
+          } else if (autoSetupError.message === 'NO_PHONE_NUMBERS_FOUND') {
+            fallbackReason = 'no_phone_numbers';
+            fallbackTitle = 'Número de teléfono requerido';
+            fallbackInstructions = [
+              '1. Ve a WhatsApp Manager',
+              '2. Agrega un número de teléfono a tu cuenta',
+              '3. Verifica el número con el código SMS',
+              '4. Regresa aquí para sincronizar'
+            ];
+            manualSetupUrl = 'https://business.facebook.com/wa/manage/phone-numbers/';
+          } else {
+            fallbackReason = 'unknown_error';
+            fallbackTitle = 'Error en la configuración';
+            fallbackInstructions = [
+              '1. Verifica que tienes todos los permisos necesarios',
+              '2. Asegúrate de que tu Business Manager esté verificado',
+              '3. Contacta al administrador si es necesario',
+              '4. Intenta nuevamente en unos minutos'
+            ];
+          }
+          
+          // Enviar información del fallback al frontend
+          redirectUrl.searchParams.set('status', 'fallback');
+          redirectUrl.searchParams.set('setup_method', 'manual');
+          redirectUrl.searchParams.set('fallback_reason', fallbackReason);
+          redirectUrl.searchParams.set('fallback_title', encodeURIComponent(fallbackTitle));
+          redirectUrl.searchParams.set('manual_setup_url', manualSetupUrl);
+          redirectUrl.searchParams.set('instructions', encodeURIComponent(JSON.stringify(fallbackInstructions)));
+          
+          console.log(`🔄 Redirigiendo a fallback manual: ${fallbackReason}`);
+          return res.redirect(redirectUrl.toString());
+        }
+        
+      } catch (setupError) {
+        console.error('❌ Error crítico en setup de WhatsApp:', setupError.message);
+        console.error('Stack:', setupError.stack);
+        
+        const frontendUrl = stateData.frontend_url || 'http://localhost:5173';
+        return res.redirect(`${frontendUrl}/whatsapp/setup?error=setup_failed&error_description=${encodeURIComponent(setupError.message)}`);
+      }
+    }
     
     if (isLinking) {
       // 🔗 ESCENARIO 1: VINCULAR FACEBOOK A CUENTA EXISTENTE
@@ -446,7 +669,7 @@ router.get('/facebook/callback', async (req, res) => {
         if (existingProvider) {
           // Actualizar token existente
           await db.execute(
-            'UPDATE user_providers SET provider_id = ?, access_token_enc = ? WHERE user_id = ? AND provider = "FACEBOOK"',
+            'UPDATE user_providers SET provider_id = ?, access_token_enc = ?, updated_at = NOW() WHERE user_id = ? AND provider = "FACEBOOK"',
             [facebook_id, access_token, stateData.linkToUserId]
           );
           console.log('✅ Facebook actualizado para usuario existente');
@@ -454,7 +677,7 @@ router.get('/facebook/callback', async (req, res) => {
           // Crear nueva vinculación
           const newProviderId = uuidv4();
           await db.execute(
-            'INSERT INTO user_providers (id, user_id, provider, provider_id, access_token_enc) VALUES (?, ?, "FACEBOOK", ?, ?)',
+            'INSERT INTO user_providers (id, user_id, provider, provider_id, access_token_enc, created_at) VALUES (?, ?, "FACEBOOK", ?, ?, NOW())',
             [newProviderId, stateData.linkToUserId, facebook_id, access_token]
           );
           console.log('✅ Facebook vinculado a usuario existente');
@@ -499,7 +722,7 @@ router.get('/facebook/callback', async (req, res) => {
           // Usuario existente - actualizar token y hacer login
           console.log('👤 Usuario Facebook existente encontrado, actualizando token');
           await db.execute(
-            'UPDATE user_providers SET access_token_enc = ? WHERE user_id = ? AND provider = "FACEBOOK"',
+            'UPDATE user_providers SET access_token_enc = ?, updated_at = NOW() WHERE user_id = ? AND provider = "FACEBOOK"',
             [access_token, existingUser.user_id]
           );
           
@@ -526,30 +749,30 @@ router.get('/facebook/callback', async (req, res) => {
           const newUserId = uuidv4();
           const newProviderId = uuidv4();
           
-          // ✅ 1. Crear CLIENT (evitar undefined)
+          // ✅ 1. Crear CLIENT
           await db.execute(
             'INSERT INTO clients (id, name, plan, created_at) VALUES (?, ?, ?, NOW())',
             [
               newClientId, 
-              `Cliente de ${name || 'Usuario Facebook'}`, // Asegurar que no sea undefined
+              `Cliente de ${name || 'Usuario Facebook'}`,
               'FREE'
             ]
           );
           console.log('✅ Cliente creado:', newClientId);
 
-          // ✅ 2. Crear USER (solo campos obligatorios, evitar undefined)
+          // ✅ 2. Crear USER
           await db.execute(
             'INSERT INTO users (id, client_id, name, email, created_at) VALUES (?, ?, ?, ?, NOW())',
             [
               newUserId, 
               newClientId, 
-              name || 'Usuario Facebook', // Asegurar que no sea undefined
-              email || null // Si no hay email, explícitamente null
+              name || 'Usuario Facebook',
+              email || null
             ]
           );
           console.log('✅ Usuario creado:', newUserId);
 
-          // ✅ 3. Crear USER_PROVIDER (evitar undefined)
+          // ✅ 3. Crear USER_PROVIDER
           await db.execute(
             'INSERT INTO user_providers (id, user_id, provider, provider_id, access_token_enc, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
             [
@@ -557,7 +780,7 @@ router.get('/facebook/callback', async (req, res) => {
               newUserId, 
               'FACEBOOK', 
               facebook_id, 
-              access_token || null // Asegurar que no sea undefined
+              access_token
             ]
           );
           console.log('✅ Provider creado:', newProviderId);
@@ -577,7 +800,7 @@ router.get('/facebook/callback', async (req, res) => {
           redirectUrl.searchParams.set('fb_id', facebook_id);
           redirectUrl.searchParams.set('name', name || '');
           redirectUrl.searchParams.set('email', email || '');
-          redirectUrl.searchParams.set('new_user', 'true'); // Indicar que es usuario nuevo
+          redirectUrl.searchParams.set('new_user', 'true');
           
           console.log('🔄 Usuario nuevo creado, redirigiendo al frontend');
           return res.redirect(redirectUrl.toString());
