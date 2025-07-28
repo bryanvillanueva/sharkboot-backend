@@ -481,7 +481,17 @@ router.delete('/facebook/unlink', authGuard, async (req, res) => {
         if (!stateData.userId || !stateData.clientId) {
           console.error('❌ Setup de WhatsApp requiere userId y clientId válidos');
           const frontendUrl = stateData.frontend_url || 'http://localhost:5173';
-          return res.redirect(`${frontendUrl}/whatsapp/setup?error=invalid_session&error_description=${encodeURIComponent('Sesión inválida, por favor inicia sesión nuevamente')}`);
+          return res.send(`
+            <html>
+              <body>
+                <h3>Error de Sesión</h3>
+                <p>Sesión inválida, por favor inicia sesión nuevamente</p>
+                <script>
+                  setTimeout(() => window.close(), 3000);
+                </script>
+              </body>
+            </html>
+          `);
         }
       }
       
@@ -683,8 +693,18 @@ router.delete('/facebook/unlink', authGuard, async (req, res) => {
             redirectUrl.searchParams.set('wabas_count', availableWabas.length);
             redirectUrl.searchParams.set('phone_numbers_count', totalPhoneNumbers);
             
-            console.log('✅ Setup automático exitoso, redirigiendo al frontend');
-            return res.redirect(redirectUrl.toString());
+            console.log('✅ Setup automático exitoso, cerrando ventana');
+            return res.send(`
+              <html>
+                <body>
+                  <h3>¡WhatsApp configurado exitosamente!</h3>
+                  <p>${availableWabas.length} cuentas encontradas con ${totalPhoneNumbers} números</p>
+                  <script>
+                    setTimeout(() => window.close(), 2000);
+                  </script>
+                </body>
+              </html>
+            `);
             
           } catch (autoSetupError) {
             // 🔄 FALLBACK: Setup manual
@@ -759,8 +779,19 @@ router.delete('/facebook/unlink', authGuard, async (req, res) => {
             redirectUrl.searchParams.set('manual_setup_url', manualSetupUrl);
             redirectUrl.searchParams.set('instructions', encodeURIComponent(JSON.stringify(fallbackInstructions)));
             
-            console.log(`🔄 Redirigiendo a fallback manual: ${fallbackReason}`);
-            return res.redirect(redirectUrl.toString());
+            console.log(`🔄 Mostrando fallback manual: ${fallbackReason}`);
+            return res.send(`
+              <html>
+                <body>
+                  <h3>${decodeURIComponent(fallbackTitle)}</h3>
+                  <p>Se requiere configuración manual</p>
+                  <p><strong>Motivo:</strong> ${fallbackReason}</p>
+                  <script>
+                    setTimeout(() => window.close(), 4000);
+                  </script>
+                </body>
+              </html>
+            `);
           }
           
         } catch (setupError) {
@@ -768,7 +799,17 @@ router.delete('/facebook/unlink', authGuard, async (req, res) => {
           console.error('Stack:', setupError.stack);
           
           const frontendUrl = stateData.frontend_url || 'http://localhost:5173';
-          return res.redirect(`${frontendUrl}/whatsapp/setup?error=setup_failed&error_description=${encodeURIComponent(setupError.message)}`);
+          return res.send(`
+            <html>
+              <body>
+                <h3>Error en Configuración</h3>
+                <p>Error: ${setupError.message}</p>
+                <script>
+                  setTimeout(() => window.close(), 4000);
+                </script>
+              </body>
+            </html>
+          `);
         }
       }
       
