@@ -115,6 +115,7 @@ router.get('/numbers', authGuard, async (req, res) => {
 });
 
 // 2. POST /whatsapp/setup - Iniciar Embedded Signup
+// En routes/whatsapp.js, actualizar el endpoint POST /whatsapp/setup:
 router.post('/setup', authGuard, async (req, res) => {
   const { userId, clientId } = req.auth;
   
@@ -133,12 +134,16 @@ router.post('/setup', authGuard, async (req, res) => {
     // Obtener token de Facebook
     const accessToken = await getFacebookToken(userId);
     
+    // ✅ OBTENER frontend_url desde query parameter o header
+    const frontendUrl = req.query.frontend_url || 'http://localhost:5173';
+    
     // Generar URL de Embedded Signup
     const state = Buffer.from(JSON.stringify({
       userId,
       clientId,
       timestamp: Date.now(),
-      source: 'whatsapp_setup'
+      source: 'whatsapp_setup',
+      frontend_url: frontendUrl  
     })).toString('base64');
     
     const embedSignupUrl = `https://www.facebook.com/v23.0/dialog/oauth` +
