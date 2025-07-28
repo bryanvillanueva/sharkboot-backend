@@ -115,7 +115,6 @@ router.get('/numbers', authGuard, async (req, res) => {
 });
 
 // 2. POST /whatsapp/setup - Iniciar Embedded Signup
-// En routes/whatsapp.js, actualizar el endpoint POST /whatsapp/setup:
 router.post('/setup', authGuard, async (req, res) => {
   const { userId, clientId } = req.auth;
   
@@ -137,20 +136,28 @@ router.post('/setup', authGuard, async (req, res) => {
     // ✅ OBTENER frontend_url desde query parameter o header
     const frontendUrl = req.query.frontend_url || 'http://localhost:5173';
     
-    // Generar URL de Embedded Signup
-    const state = Buffer.from(JSON.stringify({
-      userId,
-      clientId,
+    // ✅ CONSTRUCCIÓN CORRECTA DEL STATE - SIN DOBLE ENCODING
+    const stateData = {
+      userId,           // ✅ ID del usuario actual
+      clientId,         // ✅ ID del cliente actual
       timestamp: Date.now(),
-      source: 'whatsapp_setup',
+      source: 'whatsapp_setup',  // ✅ Identificador para el callback
       frontend_url: frontendUrl  
-    })).toString('base64');
+    };
+    
+    // ✅ ENCODEAR CORRECTAMENTE: JSON -> base64 (SIN encodeURIComponent)
+    const state = Buffer.from(JSON.stringify(stateData)).toString('base64');
+    
+    console.log('🔍 State construido para WhatsApp setup:', {
+      stateData,
+      encodedState: state.substring(0, 50) + '...'
+    });
     
     const embedSignupUrl = `https://www.facebook.com/v23.0/dialog/oauth` +
       `?client_id=${process.env.FACEBOOK_APP_ID}` +
       `&redirect_uri=${encodeURIComponent('https://sharkboot-backend-production.up.railway.app/auth/facebook/callback')}` +
       `&scope=whatsapp_business_management,whatsapp_business_messaging` +
-      `&state=${state}` +
+      `&state=${state}` +  // ✅ State ya está correctamente encodificado
       `&response_type=code`;
     
     res.json({

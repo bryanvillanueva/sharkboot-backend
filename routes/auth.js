@@ -400,39 +400,64 @@ router.get('/facebook/callback', async (req, res) => {
             const payload = JSON.parse(atob(jwtParts[1]));
             console.log('📋 JWT payload:', payload);
             
-            // Crear stateData desde el JWT
+            // ✅ CREAR stateData con valores seguros (nunca undefined)
             stateData = {
-              timestamp: Date.now(), // Timestamp actual
-              source: 'whatsapp_setup', // Asumir que es setup de WhatsApp
-              frontend_url: 'http://localhost:5173', // URL por defecto
-              userId: payload.userId || payload.user_id || payload.sub,
-              clientId: payload.clientId || payload.client_id
+              timestamp: Date.now(),
+              source: 'whatsapp_setup',
+              frontend_url: 'http://localhost:5173',
+              // ✅ Usar null en lugar de undefined para valores faltantes
+              userId: payload.userId || payload.user_id || payload.sub || null,
+              clientId: payload.clientId || payload.client_id || null
             };
             
             console.log('✅ State reconstruido desde JWT:', stateData);
+            
+            // ✅ VALIDAR que tenemos los datos mínimos necesarios
+            if (!stateData.userId || !stateData.clientId) {
+              console.error('❌ JWT no contiene userId o clientId válidos');
+              throw new Error('JWT incompleto - faltan userId o clientId');
+            }
           } else {
             throw new Error('JWT malformado');
           }
         } catch (jwtError) {
           console.error('❌ Error decodificando JWT:', jwtError);
-          throw new Error('State JWT inválido');
+          throw new Error('State JWT inválido: ' + jwtError.message);
         }
       } else {
         // Intentar parsear como JSON normal
         stateData = JSON.parse(decodedState);
         console.log('✅ State parseado como JSON:', stateData);
+        
+        // ✅ SANITIZAR datos de JSON también
+        stateData = {
+          timestamp: stateData.timestamp || Date.now(),
+          source: stateData.source || 'unknown',
+          frontend_url: stateData.frontend_url || 'http://localhost:5173',
+          userId: stateData.userId || stateData.linkToUserId || null,
+          clientId: stateData.clientId || null
+        };
       }
     } catch (parseError) {
       console.error('❌ Error parseando state:', parseError);
       console.log('🔍 State original:', state);
       
-      // Fallback: crear state básico
+      // ✅ FALLBACK: crear state básico con valores seguros
       stateData = {
         timestamp: Date.now(),
-        source: 'whatsapp_setup',
-        frontend_url: 'http://localhost:5173'
+        source: 'unknown',
+        frontend_url: 'http://localhost:5173',
+        userId: null,
+        clientId: null
       };
       console.log('🔄 Usando fallback state:', stateData);
+    }
+
+    // ✅ VALIDACIÓN ADICIONAL antes de usar en consultas SQL
+    if (stateData.source === 'whatsapp_setup' && (!stateData.userId || !stateData.clientId)) {
+      console.error('❌ Setup de WhatsApp requiere userId y clientId válidos');
+      const frontendUrl = stateData.frontend_url || 'http://localhost:5173';
+      return res.redirect(`${frontendUrl}/whatsapp/setup?error=invalid_session&error_description=${encodeURIComponent('Sesión inválida, por favor inicia sesión nuevamente')}`);
     }
 
     // Verificar que el estado sea válido (no mayor a 1 hora)
