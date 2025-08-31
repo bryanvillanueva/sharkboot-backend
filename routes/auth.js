@@ -705,6 +705,13 @@ router.delete('/facebook/unlink', authGuard, async (req, res) => {
                 
                 for (const phoneNumber of wabaData.phone_numbers) {
                   try {
+                    console.log(`🔍 Procesando número: ${phoneNumber.display_phone_number}`, {
+                      id: phoneNumber.id,
+                      code_verification_status: phoneNumber.code_verification_status,
+                      verified_name: phoneNumber.verified_name,
+                      campos_disponibles: Object.keys(phoneNumber)
+                    });
+                    
                     // Verificar que el número no esté ya registrado
                     const [[existingNumber]] = await db.execute(
                       'SELECT id FROM whatsapp_numbers WHERE phone_number_id = ?',
@@ -716,8 +723,12 @@ router.delete('/facebook/unlink', authGuard, async (req, res) => {
                       continue;
                     }
                     
-                    // Solo guardar números verificados
-                    if (phoneNumber.code_verification_status === 'VERIFIED') {
+                    // ✅ CAMBIAR LÓGICA: Aceptar números con diferentes estados de verificación
+                    const acceptableStatuses = ['VERIFIED', 'UNVERIFIED', 'PENDING', 'APPROVED'];
+                    const isAcceptable = !phoneNumber.code_verification_status || 
+                                       acceptableStatuses.includes(phoneNumber.code_verification_status);
+                    
+                    if (isAcceptable) {
                       const numberId = uuidv4();
                       const credentialId = uuidv4();
                       
@@ -749,10 +760,18 @@ router.delete('/facebook/unlink', authGuard, async (req, res) => {
                       ]);
                       
                       savedNumbersCount++;
-                      console.log(`✅ Guardado número WhatsApp: ${phoneNumber.display_phone_number}`);
+                      console.log(`✅ Guardado número WhatsApp: ${phoneNumber.display_phone_number}`, {
+                        status: phoneNumber.code_verification_status,
+                        numberId,
+                        wabaId: wabaData.waba_id
+                      });
                       
                     } else {
-                      console.log(`⚠️ Número ${phoneNumber.display_phone_number} no verificado, saltando`);
+                      console.log(`❌ Número ${phoneNumber.display_phone_number} rechazado`, {
+                        status: phoneNumber.code_verification_status,
+                        acceptableStatuses,
+                        razon: 'Estado no aceptable'
+                      });
                     }
                   } catch (phoneError) {
                     console.error(`❌ Error guardando número ${phoneNumber.display_phone_number}:`, phoneError.message);
