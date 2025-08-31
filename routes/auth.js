@@ -685,22 +685,107 @@ router.delete('/facebook/unlink', authGuard, async (req, res) => {
               throw new Error('NO_PHONE_NUMBERS_FOUND');
             }
             
-            // ✅ ÉXITO: Redirigir al frontend con datos de WABAs disponibles
+            // ✅ GUARDAR DATOS EN BASE DE DATOS ANTES DE CERRAR VENTANA
+            console.log('💾 Guardando datos de WhatsApp en base de datos...');
+            let savedNumbersCount = 0;
+            
+            for (const wabaData of availableWabas) {
+              try {
+                // Verificar límites por número
+                const [[currentCount]] = await db.execute(
+                  'SELECT COUNT(*) as count FROM whatsapp_numbers WHERE client_id = ?',
+                  [stateData.clientId]
+                );
+                
+                // Si ya alcanzó el límite, salir del loop
+                if (currentCount.count >= 5) { // Ajustar según el plan
+                  console.log('⚠️ Límite de números alcanzado, parando guardado automático');
+                  break;
+                }
+                
+                for (const phoneNumber of wabaData.phone_numbers) {
+                  try {
+                    // Verificar que el número no esté ya registrado
+                    const [[existingNumber]] = await db.execute(
+                      'SELECT id FROM whatsapp_numbers WHERE phone_number_id = ?',
+                      [phoneNumber.id]
+                    );
+                    
+                    if (existingNumber) {
+                      console.log(`⚠️ Número ${phoneNumber.display_phone_number} ya existe, saltando`);
+                      continue;
+                    }
+                    
+                    // Solo guardar números verificados
+                    if (phoneNumber.code_verification_status === 'VERIFIED') {
+                      const numberId = uuidv4();
+                      const credentialId = uuidv4();
+                      
+                      // Guardar número en whatsapp_numbers
+                      await db.execute(`
+                        INSERT INTO whatsapp_numbers 
+                        (id, client_id, phone_number_id, waba_id, display_name, phone_number, status, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, 'active', NOW())
+                      `, [
+                        numberId,
+                        stateData.clientId,
+                        phoneNumber.id,
+                        wabaData.waba_id,
+                        phoneNumber.verified_name || phoneNumber.display_phone_number,
+                        phoneNumber.display_phone_number
+                      ]);
+                      
+                      // Guardar credenciales en whatsapp_credentials
+                      await db.execute(`
+                        INSERT INTO whatsapp_credentials
+                        (id, client_id, waba_id, phone_number_id, token_enc, created_at)
+                        VALUES (?, ?, ?, ?, ?, NOW())
+                      `, [
+                        credentialId,
+                        stateData.clientId,
+                        wabaData.waba_id,
+                        phoneNumber.id,
+                        access_token
+                      ]);
+                      
+                      savedNumbersCount++;
+                      console.log(`✅ Guardado número WhatsApp: ${phoneNumber.display_phone_number}`);
+                      
+                    } else {
+                      console.log(`⚠️ Número ${phoneNumber.display_phone_number} no verificado, saltando`);
+                    }
+                  } catch (phoneError) {
+                    console.error(`❌ Error guardando número ${phoneNumber.display_phone_number}:`, phoneError.message);
+                  }
+                }
+              } catch (wabaError) {
+                console.error(`❌ Error procesando WABA ${wabaData.waba_id}:`, wabaError.message);
+              }
+            }
+            
+            console.log(`✅ Setup automático completado. ${savedNumbersCount} números guardados en base de datos`);
+            
+            // ✅ ÉXITO: Mostrar mensaje con información real guardada
             const frontendUrl = stateData.frontend_url || 'http://localhost:5173';
             const redirectUrl = new URL(frontendUrl + '/whatsapp/setup');
             redirectUrl.searchParams.set('status', 'success');
             redirectUrl.searchParams.set('setup_method', 'automatic');
+            redirectUrl.searchParams.set('numbers_saved', savedNumbersCount);
             redirectUrl.searchParams.set('wabas_count', availableWabas.length);
             redirectUrl.searchParams.set('phone_numbers_count', totalPhoneNumbers);
             
-            console.log('✅ Setup automático exitoso, cerrando ventana');
             return res.send(`
               <html>
                 <body>
                   <h3>¡WhatsApp configurado exitosamente!</h3>
-                  <p>${availableWabas.length} cuentas encontradas con ${totalPhoneNumbers} números</p>
+                  <p>${savedNumbersCount} números guardados y listos para usar</p>
                   <script>
-                    setTimeout(() => window.close(), 2000);
+                    setTimeout(() => {
+                      if (window.opener) {
+                        window.opener.location.reload();
+                      }
+                      window.close();
+                    }, 2000);
                   </script>
                 </body>
               </html>
