@@ -707,9 +707,12 @@ router.delete('/facebook/unlink', authGuard, async (req, res) => {
                   try {
                     console.log(`🔍 Procesando número: ${phoneNumber.display_phone_number}`, {
                       id: phoneNumber.id,
-                      code_verification_status: phoneNumber.code_verification_status,
+                      verification_status: phoneNumber.code_verification_status || 'N/A',
                       verified_name: phoneNumber.verified_name,
-                      campos_disponibles: Object.keys(phoneNumber)
+                      es_testing: phoneNumber.display_phone_number && (
+                        phoneNumber.display_phone_number.includes('15550') || 
+                        phoneNumber.display_phone_number.includes('15551')
+                      ) ? 'SÍ' : 'NO'
                     });
                     
                     // Verificar que el número no esté ya registrado
@@ -723,12 +726,15 @@ router.delete('/facebook/unlink', authGuard, async (req, res) => {
                       continue;
                     }
                     
-                    // ✅ CAMBIAR LÓGICA: Aceptar números con diferentes estados de verificación
-                    const acceptableStatuses = ['VERIFIED', 'UNVERIFIED', 'PENDING', 'APPROVED'];
-                    const isAcceptable = !phoneNumber.code_verification_status || 
-                                       acceptableStatuses.includes(phoneNumber.code_verification_status);
+                    // ✅ NUEVA LÓGICA: Solo filtrar números de testing, aceptar todos los demás
+                    const isTestNumber = phoneNumber.display_phone_number && (
+                      phoneNumber.display_phone_number.includes('15550') || // Números de test comunes
+                      phoneNumber.display_phone_number.includes('15551') ||
+                      phoneNumber.display_phone_number === '+1 555-0199' ||
+                      phoneNumber.display_phone_number === '+1 555-0100'
+                    );
                     
-                    if (isAcceptable) {
+                    if (!isTestNumber) {
                       const numberId = uuidv4();
                       const credentialId = uuidv4();
                       
@@ -761,16 +767,16 @@ router.delete('/facebook/unlink', authGuard, async (req, res) => {
                       
                       savedNumbersCount++;
                       console.log(`✅ Guardado número WhatsApp: ${phoneNumber.display_phone_number}`, {
-                        status: phoneNumber.code_verification_status,
+                        verification_status: phoneNumber.code_verification_status,
                         numberId,
-                        wabaId: wabaData.waba_id
+                        wabaId: wabaData.waba_id,
+                        es_operativo: 'SI - Número real'
                       });
                       
                     } else {
                       console.log(`❌ Número ${phoneNumber.display_phone_number} rechazado`, {
-                        status: phoneNumber.code_verification_status,
-                        acceptableStatuses,
-                        razon: 'Estado no aceptable'
+                        razon: 'Es número de testing',
+                        display_phone_number: phoneNumber.display_phone_number
                       });
                     }
                   } catch (phoneError) {
@@ -795,16 +801,45 @@ router.delete('/facebook/unlink', authGuard, async (req, res) => {
             
             return res.send(`
               <html>
+                <head>
+                  <title>WhatsApp Setup Completo</title>
+                </head>
                 <body>
                   <h3>¡WhatsApp configurado exitosamente!</h3>
                   <p>${savedNumbersCount} números guardados y listos para usar</p>
+                  <p>Esta ventana se cerrará automáticamente...</p>
                   <script>
-                    setTimeout(() => {
-                      if (window.opener) {
+                    console.log('📱 Setup completado, cerrando ventana en 3 segundos...');
+                    
+                    // Intentar recargar la ventana principal
+                    try {
+                      if (window.opener && !window.opener.closed) {
+                        console.log('🔄 Recargando ventana principal...');
                         window.opener.location.reload();
                       }
-                      window.close();
-                    }, 2000);
+                    } catch (e) {
+                      console.log('⚠️ No se pudo recargar ventana principal:', e);
+                    }
+                    
+                    // Forzar cierre de ventana con múltiples métodos
+                    setTimeout(() => {
+                      console.log('🚪 Cerrando ventana...');
+                      try {
+                        window.close();
+                      } catch (e) {
+                        console.log('⚠️ Error cerrando ventana:', e);
+                        // Fallback: redirigir si no se puede cerrar
+                        window.location.href = '${frontendUrl}/whatsapp?setup_complete=true';
+                      }
+                    }, 3000);
+                    
+                    // Fallback adicional: cerrar si la ventana sigue abierta después de 10 segundos
+                    setTimeout(() => {
+                      if (!window.closed) {
+                        console.log('🔄 Fallback: redirigiendo...');
+                        window.location.href = '${frontendUrl}/whatsapp?setup_complete=true';
+                      }
+                    }, 10000);
                   </script>
                 </body>
               </html>
