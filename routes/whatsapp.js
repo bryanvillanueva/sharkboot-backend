@@ -114,6 +114,34 @@ router.get('/numbers', authGuard, async (req, res) => {
   }
 });
 
+// 1.2. GET /whatsapp/numbers-simple - Listar números básicos del cliente
+router.get('/numbers-simple', authGuard, async (req, res) => {
+  const { clientId } = req.auth;
+  
+  try {
+    const [numbers] = await db.execute(`
+      SELECT 
+        phone_number,
+        display_name,
+        phone_number_id
+      FROM whatsapp_numbers 
+      WHERE client_id = ?
+      ORDER BY created_at DESC
+    `, [clientId]);
+    
+    res.json({
+      numbers
+    });
+    
+  } catch (error) {
+    console.error('Error listando números WhatsApp básicos:', error);
+    res.status(500).json({ 
+      error: 'Error listando números de WhatsApp',
+      details: error.message
+    });
+  }
+});
+
 // 2. POST /whatsapp/setup - Iniciar Embedded Signup
 router.post('/setup', authGuard, async (req, res) => {
   const { userId, clientId } = req.auth;

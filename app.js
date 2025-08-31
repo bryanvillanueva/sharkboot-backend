@@ -10,6 +10,7 @@ const openaiRoutes = require('./routes/OpenAI');
 const clientRoutes = require('./routes/client');
 const fileRoutes = require('./routes/files');
 const whatsappRoutes = require('./routes/whatsapp');
+const facebookRoutes = require('./routes/facebook');
 
 const app = express();
 app.use(cors());
@@ -63,6 +64,7 @@ app.use('/assistants', openaiRoutes);
 app.use('/client', clientRoutes);
 app.use('/assistants', fileRoutes);
 app.use('/whatsapp', whatsappRoutes);
+app.use('/facebook', facebookRoutes);
 
 // Ruta prueba
 app.get('/', (_, res) => res.json({ ok: true, node: process.version }));
